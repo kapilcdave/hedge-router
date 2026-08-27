@@ -1,0 +1,19 @@
+{
+  "name": "hedge-router",
+  "version": "0.1.0",
+  "description": "A model router that doesn't just SAVE money, but also MAKES money by hedging compute prices on Kalshi",
+  "type": "module",
+  "bin": {
+    "hedge-router": "./src/cli.js",
+    "comp": "./src/cli.js"
+  },
+  "scripts": {
+    "start": "node src/cli.js serve",
+    "test": "node --test",
+    "check": "node --check src/*.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}

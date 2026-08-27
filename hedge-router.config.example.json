@@ -1,0 +1,57 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8787
+  },
+  "routing": {
+    "defaultModel": "openai/gpt-5-mini",
+    "controlPercent": 10,
+    "maxAttempts": 2,
+    "requestTimeoutMs": 120000,
+    "qualityBias": "balanced"
+  },
+  "models": [
+    {
+      "id": "openai/gpt-5-mini",
+      "provider": "openai",
+      "upstreamModel": "gpt-5-mini",
+      "apiKeyEnv": "OPENAI_API_KEY",
+      "baseUrl": "https://api.openai.com/v1",
+      "inputPerMillion": 0.25,
+      "cachedInputPerMillion": 0.025,
+      "outputPerMillion": 2,
+      "contextWindow": 400000,
+      "qualityTier": 2
+    },
+    {
+      "id": "anthropic/claude-sonnet-5",
+      "provider": "anthropic",
+      "upstreamModel": "claude-sonnet-5",
+      "apiKeyEnv": "ANTHROPIC_API_KEY",
+      "baseUrl": "https://api.anthropic.com/v1",
+      "inputPerMillion": 2,
+      "cachedInputPerMillion": 0.2,
+      "cacheWriteInputPerMillion": 2.5,
+      "outputPerMillion": 10,
+      "contextWindow": 1000000,
+      "qualityTier": 3
+    }
+  ],
+  "telemetry": {
+    "enabled": false,
+    "remoteUrl": null,
+    "remoteTokenEnv": null,
+    "rawRetentionDays": 30,
+    "minimumCohort": 20
+  },
+  "collector": {
+    "host": "127.0.0.1",
+    "port": 8790,
+    "tokenEnv": "HEDGE_ROUTER_COLLECTOR_TOKEN",
+    "rawRetentionDays": 30,
+    "minimumCohort": 20
+  },
+  "quality": {
+    "commands": []
+  }
+}

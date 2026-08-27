@@ -1,0 +1,10 @@
+.hedge-router/
+.comp/
+.agents/
+.codex/
+hedge-router.config.json
+comp.config.json
+coverage/
+test/
+*.log
+*.tgz

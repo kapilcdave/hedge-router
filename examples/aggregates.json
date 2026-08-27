@@ -1,0 +1,9 @@
+[
+  { "date": "2026-08-01", "contributors": 25, "request_count": 600, "input_tokens": 900000, "output_tokens": 180000, "cache_ratio": 0.20, "mean_latency_ms": 1200, "error_rate": 0.01, "fallback_rate": 0.02 },
+  { "date": "2026-08-02", "contributors": 26, "request_count": 650, "input_tokens": 960000, "output_tokens": 190000, "cache_ratio": 0.21, "mean_latency_ms": 1220, "error_rate": 0.01, "fallback_rate": 0.02 },
+  { "date": "2026-08-03", "contributors": 27, "request_count": 720, "input_tokens": 1040000, "output_tokens": 205000, "cache_ratio": 0.22, "mean_latency_ms": 1280, "error_rate": 0.02, "fallback_rate": 0.03 },
+  { "date": "2026-08-04", "contributors": 25, "request_count": 590, "input_tokens": 870000, "output_tokens": 170000, "cache_ratio": 0.24, "mean_latency_ms": 1180, "error_rate": 0.01, "fallback_rate": 0.02 },
+  { "date": "2026-08-05", "contributors": 28, "request_count": 810, "input_tokens": 1190000, "output_tokens": 230000, "cache_ratio": 0.23, "mean_latency_ms": 1350, "error_rate": 0.03, "fallback_rate": 0.04 },
+  { "date": "2026-08-06", "contributors": 29, "request_count": 850, "input_tokens": 1240000, "output_tokens": 240000, "cache_ratio": 0.24, "mean_latency_ms": 1380, "error_rate": 0.02, "fallback_rate": 0.03 },
+  { "date": "2026-08-07", "contributors": 26, "request_count": 610, "input_tokens": 910000, "output_tokens": 175000, "cache_ratio": 0.25, "mean_latency_ms": 1190, "error_rate": 0.01, "fallback_rate": 0.02 }
+]

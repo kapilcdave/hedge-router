@@ -1,0 +1,7 @@
+.hedge-router/
+.comp/
+hedge-router.config.json
+comp.config.json
+node_modules/
+coverage/
+*.log
