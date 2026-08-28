@@ -23,6 +23,24 @@ curl http://127.0.0.1:8787/v1/chat/completions \
   -d '{"model":"auto","messages":[{"role":"user","content":"Fix the failing test"}]}'
 ```
 
+## Terminal dashboard
+
+Open a second terminal while the router is running:
+
+```sh
+hedge-router dashboard
+```
+
+The dashboard watches the local event ledger and `.hedge-router/evaluation.json`. It shows completed routes, fallbacks, per-request savings, model mix, the latest compute-price signal, and qualifying Kalshi paper hedges. Press `q` to exit.
+
+For a deterministic animated feed suitable for demos and terminal recordings:
+
+```sh
+hedge-router demo --duration 20
+```
+
+Both displays say `PAPER EXECUTION` prominently because Hedge Router does not place live orders. Prompts, code, paths, and tool output never appear in the dashboard. Use `--once --no-color` for a static snapshot in logs, or pass `--market FILE` to watch a different evaluation.
+
 Useful commands:
 
 ```sh

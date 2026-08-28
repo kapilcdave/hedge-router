@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from './config.js';
 import { startCollector } from './collector.js';
+import { runDashboard } from './dashboard.js';
 import { createKalshiSnapshots, resolveKalshiSnapshots } from './kalshi.js';
 import { evaluateMarkets } from './market.js';
 import { fetchOrnnIndex, mergeOrnnIndex } from './ornn.js';
@@ -57,6 +58,22 @@ async function commandCollect(args) {
 async function commandReport(args) {
   const events = await loadEvents(args.events);
   print(savingsReport(events));
+}
+
+async function commandDashboard(args, demo = false) {
+  const refreshMs = Number(args['refresh-ms'] || (demo ? 500 : 750));
+  if (!Number.isFinite(refreshMs) || refreshMs < 100) throw new Error('--refresh-ms must be at least 100');
+  const duration = args.duration == null ? null : Number(args.duration);
+  if (duration != null && (!Number.isFinite(duration) || duration <= 0)) throw new Error('--duration must be positive');
+  const frames = args.frames == null
+    ? duration == null ? null : Math.max(1, Math.ceil((duration * 1000) / refreshMs))
+    : Number(args.frames);
+  if (frames != null && (!Number.isInteger(frames) || frames < 1)) throw new Error('--frames must be a positive integer');
+  await runDashboard({
+    demo, eventsFile: args.events, marketFile: args.market, refreshMs,
+    frames, once: Boolean(args.once), width: args.width ? Number(args.width) : undefined,
+    color: !args['no-color'], forceColor: Boolean(args.color)
+  });
 }
 
 async function commandOutcome(args) {
@@ -187,6 +204,10 @@ function help() {
 Commands:
   init [--output FILE]               Create a starter configuration
   serve [--config FILE]              Start the local proxy
+  dashboard [--events FILE] [--market FILE]
+    [--refresh-ms N] [--once]        Watch live routes and paper hedges
+  demo [--duration SEC] [--frames N] Show a deterministic, recordable feed
+    [--refresh-ms N] [--no-color]
   collect [--config FILE]            Start the authenticated telemetry collector
   report [--events FILE]             Show cost, savings, latency, and quality metrics
   session-outcome --session ID       Record tests and rating metadata
@@ -215,6 +236,8 @@ async function main() {
   const [command = 'help', ...values] = process.argv.slice(2);
   const args = parseArgs(values);
   if (command === 'serve') await commandServe(args);
+  else if (command === 'dashboard') await commandDashboard(args);
+  else if (command === 'demo') await commandDashboard(args, true);
   else if (command === 'collect') await commandCollect(args);
   else if (command === 'report') await commandReport(args);
   else if (command === 'session-outcome') await commandOutcome(args);
