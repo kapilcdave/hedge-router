@@ -7,8 +7,9 @@ import { loadConfig } from './config.js';
 import { startCollector } from './collector.js';
 import { runDashboard } from './dashboard.js';
 import { createKalshiSnapshots, resolveKalshiSnapshots } from './kalshi.js';
-import { evaluateMarkets } from './market.js';
+import { evaluateMarkets, forecastMarkets } from './market.js';
 import { fetchOrnnIndex, mergeOrnnIndex } from './ornn.js';
+import { createPaperPortfolio, placePaperOrders, settlePaperPortfolio } from './paper.js';
 import { startServer } from './server.js';
 import { aggregateDaily, createTelemetry, deleteLocalTelemetry, deleteRemoteTelemetry, experimentReport, loadEvents, savingsReport } from './telemetry.js';
 import { parseBoolean, readJson, writeJsonAtomic } from './utils.js';
@@ -28,6 +29,14 @@ function parseArgs(values) {
 
 function print(value) {
   process.stdout.write(`${typeof value === 'string' ? value : JSON.stringify(value, null, 2)}\n`);
+}
+
+async function optionalJson(file) {
+  try { return await readJson(file); }
+  catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
 }
 
 async function runCommand(command) {
@@ -70,7 +79,7 @@ async function commandDashboard(args, demo = false) {
     : Number(args.frames);
   if (frames != null && (!Number.isInteger(frames) || frames < 1)) throw new Error('--frames must be a positive integer');
   await runDashboard({
-    demo, eventsFile: args.events, marketFile: args.market, refreshMs,
+    demo, eventsFile: args.events, marketFile: args.market, paperFile: args.paper, refreshMs,
     frames, once: Boolean(args.once), width: args.width ? Number(args.width) : undefined,
     color: !args['no-color'], forceColor: Boolean(args.color)
   });
@@ -112,11 +121,53 @@ async function commandEvaluate(args) {
   else print(result);
 }
 
+async function commandPaperOpen(args) {
+  if (!args.index || !args.markets || !args.output) throw new Error('--index, --markets, and --output are required');
+  const index = await readJson(path.resolve(args.index));
+  const marketDocument = await readJson(path.resolve(args.markets));
+  const markets = marketDocument.snapshots || marketDocument;
+  const aggregates = args.aggregates ? await readJson(path.resolve(args.aggregates)) : [];
+  const signals = forecastMarkets({
+    index, markets, aggregates,
+    minimumTraining: Number(args['minimum-training'] || 5),
+    edge: Number(args.edge || 0.05)
+  });
+  const portfolio = args.portfolio
+    ? await optionalJson(path.resolve(args.portfolio)) || createPaperPortfolio({ bankroll: Number(args.bankroll || 1000) })
+    : createPaperPortfolio({ bankroll: Number(args.bankroll || 1000) });
+  const result = placePaperOrders({
+    portfolio, signals,
+    riskPercent: Number(args['risk-percent'] || 1),
+    maxEventPercent: Number(args['max-event-percent'] || 5),
+    maxContracts: Number(args['max-contracts'] || 100),
+    maxSnapshotAgeMinutes: Number(args['max-snapshot-age-minutes'] || 5)
+  });
+  await writeJsonAtomic(path.resolve(args.output), result.portfolio);
+  const skippedByReason = Object.fromEntries([...new Set(result.skipped.map((row) => row.reason))]
+    .map((reason) => [reason, result.skipped.filter((row) => row.reason === reason).length]));
+  print({
+    output: path.resolve(args.output), placed: result.placed.length, skipped: result.skipped.length,
+    skipped_by_reason: skippedByReason,
+    orders: result.portfolio.order_count, open: result.portfolio.open,
+    cash: result.portfolio.cash, equity_at_cost: result.portfolio.equity_at_cost
+  });
+}
+
+async function commandPaperSettle(args) {
+  if (!args.portfolio || !args.markets || !args.output) throw new Error('--portfolio, --markets, and --output are required');
+  const portfolio = await readJson(path.resolve(args.portfolio));
+  const markets = await readJson(path.resolve(args.markets));
+  const result = settlePaperPortfolio({ portfolio, markets });
+  await writeJsonAtomic(path.resolve(args.output), result.portfolio);
+  print({ output: path.resolve(args.output), settled: result.settled.length, pending: result.pending.length, realized_pnl: result.portfolio.realized_pnl });
+}
+
 async function commandKalshiSnapshot(args) {
   if (!args.series || !args.chip || !args.output) throw new Error('--series, --chip, and --output are required');
   const result = await createKalshiSnapshots({
     series: String(args.series).toUpperCase(), chip: String(args.chip).toUpperCase(),
-    status: args.status || 'open', feePerContract: Number(args.fee || 0),
+    status: args.status || 'open', feePerContract: args.fee == null ? null : Number(args.fee),
+    feeRate: Number(args['fee-rate'] ?? 0.07),
     slippage: Number(args.slippage || 0)
   });
   await writeJsonAtomic(path.resolve(args.output), result);
@@ -154,6 +205,7 @@ async function commandGate(args) {
     market: market ? {
       gate: Boolean(market.gate),
       observations: market.observations,
+      independent_events: market.independent_events,
       relative_brier_improvement: market.relative_brier_improvement,
       paper_pnl: market.paper_pnl,
       trades: market.trades
@@ -204,7 +256,7 @@ function help() {
 Commands:
   init [--output FILE]               Create a starter configuration
   serve [--config FILE]              Start the local proxy
-  dashboard [--events FILE] [--market FILE]
+  dashboard [--events FILE] [--market FILE] [--paper FILE]
     [--refresh-ms N] [--once]        Watch live routes and paper hedges
   demo [--duration SEC] [--frames N] Show a deterministic, recordable feed
     [--refresh-ms N] [--no-color]
@@ -216,8 +268,16 @@ Commands:
     [--minimum N] [--output FILE]
   evaluate --index FILE --markets FILE [--aggregates FILE] [--output FILE]
                                      Walk-forward paper evaluation; never trades
+  paper-open --index FILE --markets SNAPSHOT --output FILE
+    [--aggregates FILE] [--portfolio FILE] [--bankroll USD]
+    [--risk-percent N] [--max-event-percent N] [--max-contracts N]
+    [--max-snapshot-age-minutes N]
+                                     Record immutable pre-close paper orders
+  paper-settle --portfolio FILE --markets RESOLVED --output FILE
+                                     Settle paper orders and calculate P&L
   kalshi-snapshot --series TICKER --chip CHIP --output FILE
-    [--fee USD] [--slippage USD]      Capture public prices before settlement
+    [--fee-rate N] [--fee USD] [--slippage USD]
+                                     Capture public prices before settlement
   kalshi-resolve --input FILE --output FILE
                                      Resolve captured snapshots after settlement
   ornn-history --gpu GPU --chip CHIP --start YYYY-MM-DD --end YYYY-MM-DD --output FILE
@@ -243,6 +303,8 @@ async function main() {
   else if (command === 'session-outcome') await commandOutcome(args);
   else if (command === 'aggregate') await commandAggregate(args);
   else if (command === 'evaluate') await commandEvaluate(args);
+  else if (command === 'paper-open') await commandPaperOpen(args);
+  else if (command === 'paper-settle') await commandPaperSettle(args);
   else if (command === 'kalshi-snapshot') await commandKalshiSnapshot(args);
   else if (command === 'kalshi-resolve') await commandKalshiResolve(args);
   else if (command === 'ornn-history') await commandOrnnHistory(args);

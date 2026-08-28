@@ -58,9 +58,19 @@ export function buildDashboardState(events, market = null, options = {}) {
   const modelMix = [...mix.entries()]
     .map(([model, count]) => ({ model, count, share: requests.length ? count / requests.length : 0 }))
     .sort((a, b) => b.count - a.count || a.model.localeCompare(b.model));
+  const paper = options.paper || null;
   const results = Array.isArray(market?.results) ? market.results : [];
-  const hedges = results.filter((row) => row.side && row.side !== 'hold').slice(-5).reverse();
-  const latestSignal = results.at(-1) || null;
+  const paperOrders = Array.isArray(paper?.orders)
+    ? paper.orders.map((order) => ({
+      ...order, id: order.market_id, market_probability: order.market_probability,
+      paper_pnl: order.realized_pnl ?? 0
+    }))
+    : [];
+  const hedges = (paperOrders.length ? paperOrders : results.filter((row) => row.side && row.side !== 'hold')).slice(-5).reverse();
+  const newestPaperTime = paperOrders.reduce((latest, order) => order.placed_at > latest ? order.placed_at : latest, '');
+  const latestSignal = paperOrders
+    .filter((order) => order.placed_at === newestPaperTime)
+    .sort((a, b) => Number(b.net_edge || 0) - Number(a.net_edge || 0))[0] || paperOrders.at(-1) || results.at(-1) || null;
   return {
     mode: options.mode || 'live',
     frame: Number(options.frame || 0),
@@ -68,16 +78,20 @@ export function buildDashboardState(events, market = null, options = {}) {
     recent: requests.slice(-6).reverse(),
     modelMix,
     market,
+    paper,
     hedges,
     latestSignal,
     source: options.source || null
   };
 }
 
-export async function loadDashboardState({ eventsFile, marketFile, frame = 0 } = {}) {
+export async function loadDashboardState({ eventsFile, marketFile, paperFile, frame = 0 } = {}) {
   const resolvedMarket = path.resolve(marketFile || path.join(DATA_DIR, 'evaluation.json'));
-  const [events, market] = await Promise.all([loadEvents(eventsFile), optionalJson(resolvedMarket)]);
-  return buildDashboardState(events, market, { frame, mode: 'live', source: resolvedMarket });
+  const resolvedPaper = path.resolve(paperFile || path.join(DATA_DIR, 'paper.json'));
+  const [events, market, paper] = await Promise.all([
+    loadEvents(eventsFile), optionalJson(resolvedMarket), optionalJson(resolvedPaper)
+  ]);
+  return buildDashboardState(events, market, { frame, mode: 'live', source: resolvedMarket, paper });
 }
 
 function demoRequest(index) {
@@ -145,7 +159,7 @@ export function renderDashboard(state, options = {}) {
   };
 
   const report = state.report;
-  const paperPnl = Number(state.market?.paper_pnl || 0);
+  const paperPnl = Number(state.paper?.realized_pnl ?? state.market?.paper_pnl ?? 0);
   const pulse = state.frame % 2 ? '◉' : '●';
   lines.push(`╭${horizontal}╮`);
   add(`${pulse} HEDGE ROUTER  //  ${state.mode === 'demo' ? 'DEMO FEED' : 'LIVE'}  //  PAPER EXECUTION`, 'bold');
@@ -176,12 +190,19 @@ export function renderDashboard(state, options = {}) {
 
   rule('COMPUTE SIGNAL');
   if (!state.latestSignal) {
-    add(`Waiting for ${state.source || '.hedge-router/evaluation.json'}`, 'dim');
+    add(state.paper
+      ? 'No trained signal yet. Collect aligned router aggregates before opening paper orders.'
+      : `Waiting for ${state.source || '.hedge-router/evaluation.json'}`, 'dim');
   } else {
     const signal = state.latestSignal;
-    const edge = (Number(signal.probability) - Number(signal.market_probability)) * 100;
     const gate = state.market?.gate ? 'GATE OPEN' : 'RESEARCHING';
-    add(`${signal.chip || 'GPU'} PREDICTED ${money(signal.predicted_price)}   THRESHOLD ${money(signal.threshold)}   FAIR ${percent(signal.probability * 100, 1)}   MARKET ${percent(signal.market_probability * 100, 1)}   EDGE ${edge >= 0 ? '+' : ''}${percent(edge, 1)}   ${gate}`, state.market?.gate ? 'green' : 'yellow');
+    if (signal.order_id) {
+      const fair = signal.side === 'yes' ? signal.probability : 1 - signal.probability;
+      add(`${signal.chip || 'GPU'} PREDICTED ${money(signal.predicted_price)}   THRESHOLD ${money(signal.threshold)}   BUY ${String(signal.side).toUpperCase()}   FAIR ${percent(fair * 100, 1)}   ASK ${percent(signal.entry_price * 100, 1)}   NET EDGE +${percent(Number(signal.net_edge || 0) * 100, 1)}   ${gate}`, state.market?.gate ? 'green' : 'yellow');
+    } else {
+      const edge = (Number(signal.probability) - Number(signal.market_probability)) * 100;
+      add(`${signal.chip || 'GPU'} PREDICTED ${money(signal.predicted_price)}   THRESHOLD ${money(signal.threshold)}   FAIR ${percent(signal.probability * 100, 1)}   MARKET ${percent(signal.market_probability * 100, 1)}   EDGE ${edge >= 0 ? '+' : ''}${percent(edge, 1)}   ${gate}`, state.market?.gate ? 'green' : 'yellow');
+    }
   }
 
   rule('KALSHI PAPER HEDGES', 'yellow');
@@ -189,6 +210,12 @@ export function renderDashboard(state, options = {}) {
     add('PAPER  No qualifying edge after fees and slippage.', 'dim');
   } else {
     for (const hedge of state.hedges.slice(0, 4)) {
+      if (hedge.order_id) {
+        const status = String(hedge.status || 'open').toUpperCase();
+        const row = `PAPER  ${truncate(hedge.id, 25).padEnd(25)}  BUY ${String(hedge.side).toUpperCase().padEnd(3)} x${String(hedge.contracts).padEnd(3)} @ ${String(Math.round(hedge.entry_price * 100)).padStart(2)}¢   ${status.padEnd(7)}   EDGE +${percent(Number(hedge.edge || 0) * 100, 1).padStart(5)}   P&L ${status === 'OPEN' ? '—' : money(hedge.paper_pnl, true)}`;
+        add(row, status === 'OPEN' ? 'yellow' : hedge.paper_pnl >= 0 ? 'green' : 'red');
+        continue;
+      }
       const edge = hedge.side === 'yes'
         ? hedge.probability - hedge.market_probability
         : hedge.market_probability - hedge.probability;
@@ -234,7 +261,7 @@ export async function runDashboard(options = {}) {
     while (!stopped && frame < frames) {
       const state = options.demo
         ? createDemoState(frame)
-        : await loadDashboardState({ eventsFile: options.eventsFile, marketFile: options.marketFile, frame });
+        : await loadDashboardState({ eventsFile: options.eventsFile, marketFile: options.marketFile, paperFile: options.paperFile, frame });
       const view = renderDashboard(state, {
         width: options.width || output.columns || 100,
         color: options.color !== false && (terminal || options.forceColor)

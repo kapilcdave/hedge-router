@@ -18,7 +18,10 @@ test('snapshot captures a pre-settlement midpoint and provenance', () => {
     chip: 'H100', observedAt: '2026-08-26T18:00:00Z', feePerContract: 0.01, slippage: 0.02
   });
   assert.equal(snapshot.yesPrice, 0.42);
+  assert.equal(snapshot.yesAsk, 0.44);
+  assert.equal(snapshot.noAsk, 0.6);
   assert.equal(snapshot.threshold, 3);
+  assert.equal(snapshot.feeRate, 0.07);
   assert.equal(snapshot.source, 'kalshi-public-api');
   assert.throws(() => snapshotKalshiMarket(openMarket(), {
     chip: 'H100', observedAt: '2026-08-29T00:00:00Z'
@@ -48,6 +51,7 @@ test('public snapshot and settlement workflow preserves the original observation
   const result = await resolveKalshiSnapshots(document, { fetchImpl });
   assert.equal(result.resolved.length, 1);
   assert.equal(result.resolved[0].yesPrice, 0.42);
+  assert.equal(result.resolved[0].eventTicker, 'KXH100WS-26AUG28');
   assert.equal(result.resolved[0].outcomePrice, 3.12);
   assert.equal(result.pending.length, 0);
 });

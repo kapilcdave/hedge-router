@@ -31,7 +31,7 @@ Open a second terminal while the router is running:
 hedge-router dashboard
 ```
 
-The dashboard watches the local event ledger and `.hedge-router/evaluation.json`. It shows completed routes, fallbacks, per-request savings, model mix, the latest compute-price signal, and qualifying Kalshi paper hedges. Press `q` to exit.
+The dashboard watches the local event ledger, `.hedge-router/evaluation.json`, and `.hedge-router/paper.json`. It shows completed routes, fallbacks, per-request savings, model mix, the latest compute-price signal, and persistent Kalshi paper orders. Press `q` to exit.
 
 For a deterministic animated feed suitable for demos and terminal recordings:
 
@@ -39,7 +39,7 @@ For a deterministic animated feed suitable for demos and terminal recordings:
 hedge-router demo --duration 20
 ```
 
-Both displays say `PAPER EXECUTION` prominently because Hedge Router does not place live orders. Prompts, code, paths, and tool output never appear in the dashboard. Use `--once --no-color` for a static snapshot in logs, or pass `--market FILE` to watch a different evaluation.
+Both displays say `PAPER EXECUTION` prominently because Hedge Router does not place live orders. Prompts, code, paths, and tool output never appear in the dashboard. Use `--once --no-color` for a static snapshot in logs, or pass `--market FILE` and `--paper FILE` to watch different research files.
 
 Useful commands:
 
@@ -85,31 +85,45 @@ The `x-hedge-router-route`, `x-hedge-router-session-id`, and `x-hedge-router-req
 
 ## Market research
 
-The evaluator uses walk-forward ridge regression and never places an order. It is testing whether privacy-thresholded usage metadata adds predictive value beyond the last observed index value and the market price. Market fixtures represent binary threshold contracts and include a user-supplied fee estimate and modeled slippage; these are not an implementation of an exchange's exact fee formula. Live trading is intentionally absent pending legal, privacy, security, and exchange-rule review.
+The evaluator uses horizon-matched walk-forward ridge regression and never places a live order. It is testing whether privacy-thresholded usage metadata adds predictive value beyond the last observed index value and the market price. It will not generate an order until aligned router aggregates and the configured minimum number of training rows exist. Live trading is intentionally absent pending legal, privacy, security, and exchange-rule review.
 
 An end-to-end public-data workflow is available:
 
 ```sh
 # 1. Capture prices while the contracts are still open.
 hedge-router kalshi-snapshot --series KXH100WS --chip H100 \
-  --fee 0.01 --slippage 0.02 --output .hedge-router/kalshi-open.json
+  --fee-rate 0.07 --slippage 0.01 --output .hedge-router/kalshi-open.json
 
-# 2. After settlement, attach the outcome without replacing the old market price.
+# 2. Refresh the corresponding public compute-price history.
+hedge-router ornn-history --gpu H100 --chip H100 \
+  --start 2026-06-01 --end 2026-08-28 \
+  --merge .hedge-router/ornn-h100.json --output .hedge-router/ornn-h100.json
+
+# 3. Build privacy-thresholded router features.
+hedge-router aggregate --output .hedge-router/daily.json
+
+# 4. Within five minutes of the market snapshot, record risk-limited paper orders.
+hedge-router paper-open --index .hedge-router/ornn-h100.json \
+  --markets .hedge-router/kalshi-open.json --aggregates .hedge-router/daily.json \
+  --portfolio .hedge-router/paper.json --output .hedge-router/paper.json \
+  --bankroll 1000 --risk-percent 1 --max-event-percent 5
+
+# 5. After settlement, attach outcomes without replacing the entry-time quotes.
 hedge-router kalshi-resolve \
   --input .hedge-router/kalshi-open.json --output .hedge-router/kalshi-resolved.json
+hedge-router paper-settle --portfolio .hedge-router/paper.json \
+  --markets .hedge-router/kalshi-resolved.json --output .hedge-router/paper.json
 
-# 3. Download the corresponding public compute-price history.
-hedge-router ornn-history --gpu H100 --chip H100 \
-  --start 2026-06-01 --end 2026-08-26 --output .hedge-router/ornn-h100.json
-
-# 4. Evaluate strictly out of sample.
+# 6. Evaluate the research history strictly out of sample.
 hedge-router evaluate --index .hedge-router/ornn-h100.json \
   --markets .hedge-router/kalshi-resolved.json --aggregates .hedge-router/daily.json \
   --output .hedge-router/evaluation.json
 hedge-router gate --market .hedge-router/evaluation.json
 ```
 
-`kalshi-snapshot` uses Kalshi's unauthenticated market-data API and rejects observations at or after contract close. `kalshi-resolve` preserves the pre-close price, so settlement data cannot leak into the prediction. `ornn-history` normalizes the public Ornn index history for H100, H200, B200, A100, and RTX 5090 into evaluator-ready rows. Keep imported index data local unless your license permits redistribution.
+`kalshi-snapshot` uses Kalshi's unauthenticated market-data API, captures executable Yes and No asks, and rejects observations at or after contract close. Paper placement also rejects stale snapshots, duplicate markets, and positions outside the bankroll or per-event exposure limits. `kalshi-resolve` preserves the entry-time quotes, so settlement data cannot leak into the prediction. `ornn-history` normalizes the public Ornn index history for H100, H200, B200, A100, and RTX 5090 into evaluator-ready rows. Keep imported index data local unless your license permits redistribution.
+
+The default event-contract taker fee is calculated per trade as `ceil(0.07 × contracts × price × (1-price))` in cents, following Kalshi's published [fee schedule](https://kalshi.com/docs/kalshi-fee-schedule.pdf). Use `--fee-rate` or the legacy fixed `--fee` override when a product has a different schedule. Modeled slippage is separate.
 
 Because the public history window is limited, preserve an accumulating local series during later refreshes with `--merge .hedge-router/ornn-h100.json --output .hedge-router/ornn-h100.json`. Fresh same-day observations replace older ones; older dates remain intact.
 
@@ -119,7 +133,7 @@ The files in `examples/` are synthetic and document the input shapes:
 - Market rows contain the contract ID, settlement date, chip, threshold, normalized Yes price, per-contract fee, modeled slippage, and resolved index price.
 - Aggregate rows are produced by `hedge-router aggregate` only after the configured minimum contributor count is met.
 
-The market gate requires at least 30 resolved observations, a 5% out-of-sample Brier-score improvement over both the public-market and last-price baselines, and positive paper P&L after costs. The router gate requires 500 completed sessions from 25 contributors, at least 20% savings, no more than five percentage points of quality degradation against the control cohort, and less than 100 ms p95 local routing overhead.
+The market gate requires at least 30 distinct settlement events—not merely 30 correlated strikes—a 5% out-of-sample Brier-score improvement over both the public-market and last-price baselines, and positive paper P&L after fees and slippage. The router gate requires 500 completed sessions from 25 contributors, at least 20% savings, no more than five percentage points of quality degradation against the control cohort, and less than 100 ms p95 local routing overhead.
 
 This software is experimental and is not investment advice.
 

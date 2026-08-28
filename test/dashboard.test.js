@@ -50,3 +50,18 @@ test('failed and fallback routes have visible operational status', () => {
   assert.match(view, /FALLBACK/);
   assert.match(view, /ERROR/);
 });
+
+test('dashboard prefers persistent portfolio orders over backtest rows', () => {
+  const paper = {
+    realized_pnl: 0,
+    orders: [{
+      order_id: 'paper_one', market_id: 'KXH100WS-LIVE', side: 'yes', contracts: 12,
+      entry_price: 0.24, probability: 0.34, market_probability: 0.24,
+      predicted_price: 3.2, threshold: 3, edge: 0.1, chip: 'H100', status: 'open'
+    }]
+  };
+  const view = renderDashboard(buildDashboardState([request()], null, { paper }), { color: false });
+  assert.match(view, /KXH100WS-LIVE/);
+  assert.match(view, /BUY YES x12/);
+  assert.match(view, /OPEN/);
+});

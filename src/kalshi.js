@@ -46,6 +46,21 @@ export function yesMidpoint(market) {
   throw new Error(`${market.ticker} has no usable Yes market price`);
 }
 
+function executableQuotes(market) {
+  const yesBid = Number(market.yes_bid_dollars);
+  const directYesAsk = Number(market.yes_ask_dollars);
+  const noBid = Number(market.no_bid_dollars);
+  const directNoAsk = Number(market.no_ask_dollars);
+  const yesAsk = Number.isFinite(directYesAsk) && directYesAsk > 0 ? directYesAsk : 1 - noBid;
+  const noAsk = Number.isFinite(directNoAsk) && directNoAsk > 0 ? directNoAsk : 1 - yesBid;
+  return {
+    yesBid: Number.isFinite(yesBid) && yesBid >= 0 ? yesBid : null,
+    yesAsk: Number.isFinite(yesAsk) && yesAsk > 0 && yesAsk < 1 ? yesAsk : null,
+    noBid: Number.isFinite(noBid) && noBid >= 0 ? noBid : null,
+    noAsk: Number.isFinite(noAsk) && noAsk > 0 && noAsk < 1 ? noAsk : null
+  };
+}
+
 export function snapshotKalshiMarket(market, options) {
   if (market.market_type && market.market_type !== 'binary') throw new Error(`${market.ticker} is not binary`);
   if (market.strike_type !== 'greater') throw new Error(`${market.ticker} uses unsupported strike type ${market.strike_type}`);
@@ -60,7 +75,9 @@ export function snapshotKalshiMarket(market, options) {
     chip: options.chip,
     threshold: finite(market.floor_strike, 'floor_strike'),
     yesPrice: yesMidpoint(market),
-    feePerContract: Number(options.feePerContract || 0),
+    ...executableQuotes(market),
+    feePerContract: options.feePerContract == null ? null : Number(options.feePerContract),
+    feeRate: Number(options.feeRate ?? 0.07),
     slippage: Number(options.slippage || 0),
     observedAt,
     closeTime,
@@ -112,11 +129,17 @@ export async function resolveKalshiSnapshots(snapshotDocument, options = {}) {
     }
     resolved.push({
       id: snapshot.id,
+      eventTicker: snapshot.eventTicker,
       date: snapshot.date,
       chip: snapshot.chip,
       threshold: snapshot.threshold,
       yesPrice: snapshot.yesPrice,
+      yesBid: snapshot.yesBid,
+      yesAsk: snapshot.yesAsk,
+      noBid: snapshot.noBid,
+      noAsk: snapshot.noAsk,
       feePerContract: snapshot.feePerContract,
+      feeRate: snapshot.feeRate,
       slippage: snapshot.slippage,
       observedAt: snapshot.observedAt,
       closeTime: snapshot.closeTime,

@@ -1,6 +1,6 @@
 {
   "name": "hedge-router",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A model router that doesn't just SAVE money, but also MAKES money by hedging compute prices on Kalshi",
   "type": "module",
   "bin": {
