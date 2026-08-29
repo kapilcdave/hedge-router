@@ -10,9 +10,10 @@ import { createKalshiSnapshots, resolveKalshiSnapshots } from './kalshi.js';
 import { evaluateMarkets, forecastMarkets } from './market.js';
 import { fetchOrnnIndex, mergeOrnnIndex } from './ornn.js';
 import { createPaperPortfolio, placePaperOrders, settlePaperPortfolio } from './paper.js';
+import { pilotPaths, runPilotCycle, weeklyPilotReport } from './pilot.js';
 import { startServer } from './server.js';
 import { aggregateDaily, createTelemetry, deleteLocalTelemetry, deleteRemoteTelemetry, experimentReport, loadEvents, savingsReport } from './telemetry.js';
-import { parseBoolean, readJson, writeJsonAtomic } from './utils.js';
+import { DATA_DIR, parseBoolean, readJson, writeJsonAtomic } from './utils.js';
 
 function parseArgs(values) {
   const args = { _: [] };
@@ -162,6 +163,51 @@ async function commandPaperSettle(args) {
   print({ output: path.resolve(args.output), settled: result.settled.length, pending: result.pending.length, realized_pnl: result.portfolio.realized_pnl });
 }
 
+async function pilotOptions(args) {
+  const { config } = await loadConfig(args.config);
+  if (!args.series || !args.gpu || !args.chip) throw new Error('--series, --gpu, and --chip are required');
+  return {
+    series: String(args.series).toUpperCase(), gpu: args.gpu, chip: String(args.chip).toUpperCase(),
+    dataDir: args.dir ? path.resolve(args.dir) : DATA_DIR, eventsFile: args.events,
+    minimumContributors: Number(args['minimum-contributors'] ?? config.telemetry.minimumCohort),
+    historyDays: Number(args['history-days'] ?? 85), minimumTraining: Number(args['minimum-training'] ?? 5),
+    edge: Number(args.edge ?? 0.05), bankroll: Number(args.bankroll ?? 1000),
+    riskPercent: Number(args['risk-percent'] ?? 1), maxEventPercent: Number(args['max-event-percent'] ?? 5),
+    maxContracts: Number(args['max-contracts'] ?? 100), maxSnapshotAgeMinutes: Number(args['max-snapshot-age-minutes'] ?? 5),
+    maxLockAgeHours: Number(args['max-lock-age-hours'] ?? 6),
+    feeRate: Number(args['fee-rate'] ?? 0.07), slippage: Number(args.slippage ?? 0.01)
+  };
+}
+
+async function commandPilot(args, daemon = false) {
+  const options = await pilotOptions(args);
+  const intervalHours = Number(args['interval-hours'] ?? 24);
+  if (!Number.isFinite(intervalHours) || intervalHours <= 0) throw new Error('--interval-hours must be positive');
+  do {
+    try { print((await runPilotCycle(options)).summary); }
+    catch (error) {
+      if (!daemon) throw error;
+      print({ status: 'error', timestamp: new Date().toISOString(), message: error.message });
+    }
+    if (!daemon || args.once) break;
+    await new Promise((resolve) => setTimeout(resolve, intervalHours * 3_600_000));
+  } while (true);
+}
+
+async function commandPilotReport(args) {
+  const chip = String(args.chip || 'H100').toUpperCase();
+  const paths = pilotPaths(args.dir ? path.resolve(args.dir) : DATA_DIR, chip);
+  const [runs, portfolio, evaluation, events] = await Promise.all([
+    loadEvents(args.runs || paths.runs),
+    optionalJson(path.resolve(args.portfolio || paths.paper)),
+    optionalJson(path.resolve(args.market || paths.evaluation)),
+    loadEvents(args.events)
+  ]);
+  const report = weeklyPilotReport({ runs, portfolio, evaluation, events, days: Number(args.days || 7) });
+  if (args.output) await writeJsonAtomic(path.resolve(args.output), report);
+  else print(report);
+}
+
 async function commandKalshiSnapshot(args) {
   if (!args.series || !args.chip || !args.output) throw new Error('--series, --chip, and --output are required');
   const result = await createKalshiSnapshots({
@@ -275,6 +321,14 @@ Commands:
                                      Record immutable pre-close paper orders
   paper-settle --portfolio FILE --markets RESOLVED --output FILE
                                      Settle paper orders and calculate P&L
+  pilot-run --series TICKER --gpu GPU --chip CHIP
+    [--minimum-contributors N] [--max-lock-age-hours N] [--dir DIR]
+                                     Run one locked capture-to-report cycle
+  pilot-daemon --series TICKER --gpu GPU --chip CHIP
+    [--interval-hours N] [--max-lock-age-hours N] [--once]
+                                     Run the pilot cycle every 24 hours
+  pilot-report [--chip CHIP] [--days N] [--output FILE]
+    [--dir DIR]                      Produce a weekly falsification scorecard
   kalshi-snapshot --series TICKER --chip CHIP --output FILE
     [--fee-rate N] [--fee USD] [--slippage USD]
                                      Capture public prices before settlement
@@ -305,6 +359,9 @@ async function main() {
   else if (command === 'evaluate') await commandEvaluate(args);
   else if (command === 'paper-open') await commandPaperOpen(args);
   else if (command === 'paper-settle') await commandPaperSettle(args);
+  else if (command === 'pilot-run') await commandPilot(args);
+  else if (command === 'pilot-daemon') await commandPilot(args, true);
+  else if (command === 'pilot-report') await commandPilotReport(args);
   else if (command === 'kalshi-snapshot') await commandKalshiSnapshot(args);
   else if (command === 'kalshi-resolve') await commandKalshiResolve(args);
   else if (command === 'ornn-history') await commandOrnnHistory(args);

@@ -125,6 +125,46 @@ hedge-router gate --market .hedge-router/evaluation.json
 
 The default event-contract taker fee is calculated per trade as `ceil(0.07 × contracts × price × (1-price))` in cents, following Kalshi's published [fee schedule](https://kalshi.com/docs/kalshi-fee-schedule.pdf). Use `--fee-rate` or the legacy fixed `--fee` override when a product has a different schedule. Modeled slippage is separate.
 
+### Automated pilot
+
+Run the complete workflow once:
+
+```sh
+hedge-router pilot-run --series KXH100WS --gpu H100 --chip H100 \
+  --minimum-contributors 1
+```
+
+For a private single-user experiment, `--minimum-contributors 1` permits local aggregates. Keep the configured privacy threshold for any multi-user pilot.
+
+The cycle is locked against overlapping runs and performs these operations in order:
+
+1. Refresh and merge the Ornn index history.
+2. Build privacy-thresholded daily router aggregates.
+3. Retry settlement of contracts captured by earlier runs.
+4. Settle matching paper positions and update realized P&L.
+5. Capture and archive current executable Kalshi quotes.
+6. Forecast at each contract's actual time horizon.
+7. Place only fresh, trained, risk-limited paper orders.
+8. Refresh the evaluation and append an immutable run summary.
+
+Run it continuously in the foreground every 24 hours:
+
+```sh
+hedge-router pilot-daemon --series KXH100WS --gpu H100 --chip H100 \
+  --minimum-contributors 1 --interval-hours 24
+```
+
+For a deployed pilot, invoke `pilot-run` from a process manager or operating-system scheduler instead of relying on an unattended terminal. Each run is resumable: pending markets, resolved history, paper orders, daily aggregates, index history, archived snapshots, and run logs live under `.hedge-router/`. Overlapping cycles are rejected; a lock abandoned for more than six hours is recovered automatically.
+
+Produce the weekly falsification scorecard:
+
+```sh
+hedge-router pilot-report --chip H100 --days 7 \
+  --output .hedge-router/pilot/weekly.json
+```
+
+The scorecard reports collection failures, routing savings and quality, independent market events, Brier improvement, portfolio results, and the still-unmeasured basis risk. Its verdict is `collecting`, `passed`, or `failed`; insufficient data never becomes a pass.
+
 Because the public history window is limited, preserve an accumulating local series during later refreshes with `--merge .hedge-router/ornn-h100.json --output .hedge-router/ornn-h100.json`. Fresh same-day observations replace older ones; older dates remain intact.
 
 The files in `examples/` are synthetic and document the input shapes:
