@@ -1,0 +1,8 @@
+{
+  "name": "hedge-router-status",
+  "version": "0.1.0",
+  "description": "Show hedge router compute exposure and paper P&L in Claude Code.",
+  "author": {
+    "name": "hedge router"
+  }
+}

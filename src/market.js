@@ -10,6 +10,23 @@ export function kalshiFee(contracts, price, rate = 0.07) {
   return Math.ceil((feeRate * count * probability * (1 - probability)) * 100 - 1e-9) / 100;
 }
 
+export function parseSettlementValue(value) {
+  if (value == null) return null;
+  const cleaned = String(value).replace(/[$,\s]/g, '');
+  if (!cleaned || !/^-?\d*\.?\d+$/.test(cleaned)) return null;
+  const number = Number(cleaned);
+  return Number.isFinite(number) ? number : null;
+}
+
+export function settlementOutcome(market, threshold) {
+  const result = String(market?.result ?? '').trim().toLowerCase();
+  if (result === 'yes') return 1;
+  if (result === 'no') return 0;
+  const price = parseSettlementValue(market?.outcomePrice);
+  if (price == null) return null;
+  return price > Number(threshold) ? 1 : 0;
+}
+
 export function validateMarketDataset({ index, markets, aggregates, requireOutcome = true }) {
   if (!Array.isArray(index) || !Array.isArray(markets) || !Array.isArray(aggregates)) {
     throw new Error('Index, markets, and aggregates must be arrays');
@@ -30,7 +47,9 @@ export function validateMarketDataset({ index, markets, aggregates, requireOutco
     for (const field of ['threshold', 'yesPrice', 'slippage']) {
       if (!Number.isFinite(Number(market[field]))) throw new Error(`${market.id} has invalid ${field}`);
     }
-    if (requireOutcome && !Number.isFinite(Number(market.outcomePrice))) throw new Error(`${market.id} has invalid outcomePrice`);
+    if (requireOutcome && settlementOutcome(market, market.threshold) == null) {
+      throw new Error(`${market.id} has no usable settlement (need result yes/no or numeric outcomePrice)`);
+    }
     if (market.feePerContract != null && !Number.isFinite(Number(market.feePerContract))) throw new Error(`${market.id} has invalid feePerContract`);
     if (market.feeRate != null && !Number.isFinite(Number(market.feeRate))) throw new Error(`${market.id} has invalid feeRate`);
     for (const field of ['yesAsk', 'noAsk']) {
@@ -124,8 +143,19 @@ function featuresFor(aggregate = {}) {
   ];
 }
 
-function previousIndex(index, date, chip) {
-  return index.filter((row) => row.chip === chip && row.date < date).sort((a, b) => b.date.localeCompare(a.date))[0];
+// An index row is usable only once it has been published: its own observation timestamp when
+// the source provides one, otherwise the end of the day it summarizes.
+function indexAvailability(row) {
+  const observed = Date.parse(row.observedAt);
+  if (Number.isFinite(observed)) return observed;
+  return Date.parse(`${row.date}T00:00:00Z`) + 86_400_000;
+}
+
+function availableIndex(index, chip, asOf) {
+  const limit = Date.parse(asOf);
+  return index
+    .filter((row) => row.chip === chip && indexAvailability(row) <= limit)
+    .sort((a, b) => a.date.localeCompare(b.date));
 }
 
 function addDays(date, days) {
@@ -138,19 +168,18 @@ function daysBetween(start, end) {
   return Math.max(1, Math.round((Date.parse(`${end}T00:00:00Z`) - Date.parse(`${start}T00:00:00Z`)) / 86_400_000));
 }
 
-function historicalChanges(index, chip, beforeDate, horizonDays) {
-  const series = index.filter((row) => row.chip === chip && row.date < beforeDate).sort((a, b) => a.date.localeCompare(b.date));
-  const byDate = new Map(series.map((row) => [row.date, row]));
-  return series.flatMap((prior) => {
+function historicalChanges(available, horizonDays) {
+  const byDate = new Map(available.map((row) => [row.date, row]));
+  return available.flatMap((prior) => {
     const current = byDate.get(addDays(prior.date, horizonDays));
     return current ? [{ prior, current, target: current.price - prior.price }] : [];
   });
 }
 
-function trainingRows(index, aggregates, chip, beforeDate, horizonDays) {
+function trainingRows(available, aggregates, horizonDays) {
   const aggregateMap = new Map(aggregates.map((row) => [row.date, row]));
   const rows = [];
-  for (const change of historicalChanges(index, chip, beforeDate, horizonDays)) {
+  for (const change of historicalChanges(available, horizonDays)) {
     const aggregate = aggregateMap.get(change.prior.date);
     if (aggregate) rows.push({ features: featuresFor(aggregate), target: change.target });
   }
@@ -162,18 +191,21 @@ function tradeFee(market, price, contracts = 1) {
   return kalshiFee(contracts, price, Number(market.feeRate ?? 0.07));
 }
 
-export function forecastMarkets({ index, markets, aggregates, minimumTraining = 5, edge = 0.05 }) {
+export function forecastMarkets({ index, markets, aggregates, minimumTraining = 5, edge = 0.05, requireSignal = true }) {
   validateMarketDataset({ index, markets, aggregates, requireOutcome: false });
   const aggregateMap = new Map(aggregates.map((row) => [row.date, row]));
   const results = [];
   for (const market of [...markets].sort((a, b) => a.date.localeCompare(b.date))) {
-    const prior = previousIndex(index, market.date, market.chip);
+    // Information cutoff is the observation, never the settlement date: a snapshot taken days
+    // before close cannot see index prints published after it.
+    const available = availableIndex(index, market.chip, market.observedAt || `${market.date}T00:00:00Z`);
+    const prior = available.at(-1);
     if (!prior) continue;
     const horizonDays = daysBetween(prior.date, market.date);
     const aggregate = aggregateMap.get(prior.date);
-    const training = trainingRows(index, aggregates, market.chip, market.date, horizonDays);
+    const training = trainingRows(available, aggregates, horizonDays);
     const targets = training.map((row) => row.target);
-    const historicalTargets = historicalChanges(index, market.chip, market.date, horizonDays).map((row) => row.target);
+    const historicalTargets = historicalChanges(available, horizonDays).map((row) => row.target);
     let predictedPrice = prior.price;
     const signalReady = Boolean(aggregate && training.length >= minimumTraining);
     if (signalReady) {
@@ -193,11 +225,12 @@ export function forecastMarkets({ index, markets, aggregates, minimumTraining = 
     let side = 'hold';
     let selectedEdge = Math.max(yesEdge, noEdge);
     let tradingCost = selectedEdge === yesEdge ? yesCost : noCost;
-    if (signalReady && yesEdge > edge + yesCost) {
+    const tradable = signalReady || !requireSignal;
+    if (tradable && yesEdge > edge + yesCost) {
       side = 'yes';
       selectedEdge = yesEdge;
       tradingCost = yesCost;
-    } else if (signalReady && noEdge > edge + noCost) {
+    } else if (tradable && noEdge > edge + noCost) {
       side = 'no';
       selectedEdge = noEdge;
       tradingCost = noCost;
@@ -219,22 +252,25 @@ export function forecastMarkets({ index, markets, aggregates, minimumTraining = 
       training_rows: training.length
     });
   }
-  return { generated_at: new Date().toISOString(), minimum_training: minimumTraining, minimum_edge: edge, results };
+  return {
+    generated_at: new Date().toISOString(), minimum_training: minimumTraining,
+    minimum_edge: edge, require_signal: requireSignal, results
+  };
 }
 
-export function evaluateMarkets({ index, markets, aggregates, minimumTraining = 5, edge = 0.05 }) {
+export function evaluateMarkets({ index, markets, aggregates, minimumTraining = 5, edge = 0.05, requireSignal = true }) {
   validateMarketDataset({ index, markets, aggregates });
-  const forecast = forecastMarkets({ index, markets, aggregates, minimumTraining, edge });
+  const forecast = forecastMarkets({ index, markets, aggregates, minimumTraining, edge, requireSignal });
   const marketById = new Map(markets.map((market) => [market.id, market]));
   const results = forecast.results.map((signal) => {
     const market = marketById.get(signal.id);
-    const outcome = Number(market.outcomePrice) > Number(market.threshold) ? 1 : 0;
+    const outcome = settlementOutcome(market, market.threshold);
     const entryPrice = signal.entry_price;
     const payout = signal.side === 'no' ? 1 - outcome : signal.side === 'yes' ? outcome : 0;
     const tradingCost = signal.fee_per_contract + signal.slippage_per_contract;
     return {
       ...signal,
-      outcome_price: Number(market.outcomePrice), outcome,
+      outcome_price: parseSettlementValue(market.outcomePrice), outcome,
       paper_pnl: signal.side === 'hold' ? 0 : payout - entryPrice - tradingCost
     };
   });

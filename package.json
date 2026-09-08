@@ -1,14 +1,16 @@
 {
   "name": "hedge-router",
   "version": "0.4.0",
-  "description": "A model router that doesn't just SAVE money, but also MAKES money by hedging compute prices on Kalshi",
+  "description": "A gateway-neutral compute exposure and paper-hedging engine",
   "type": "module",
   "bin": {
     "hedge-router": "./src/cli.js",
     "comp": "./src/cli.js"
   },
   "scripts": {
-    "start": "node src/cli.js serve",
+    "start": "node src/cli.js dashboard",
+    "ingest": "node src/cli.js ingest",
+    "legacy-proxy": "node src/cli.js serve",
     "test": "node --test",
     "check": "node --check src/*.js"
   },

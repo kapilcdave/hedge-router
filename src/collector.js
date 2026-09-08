@@ -9,6 +9,7 @@ const COLLECTOR_FILE = path.join(DATA_DIR, 'collector-events.ndjson');
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 const ALLOWED_FIELDS = new Set([
   'schema_version', 'event_type', 'timestamp', 'install_id', 'session_id', 'request_id',
+  'source', 'gateway',
   'model', 'baseline_model', 'provider', 'control', 'route_reason', 'task_class',
   'input_tokens', 'cached_input_tokens', 'cache_write_input_tokens', 'output_tokens',
   'latency_ms', 'routing_overhead_ms', 'provider_status', 'error_category',
