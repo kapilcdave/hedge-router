@@ -25,9 +25,10 @@ function safeTaskClass(value) {
   return TASK_CLASSES.has(value) ? value : 'other';
 }
 
-export async function createTelemetry(config) {
+export async function createTelemetry(config, options = {}) {
   const id = await identity();
   await mkdir(DATA_DIR, { recursive: true, mode: 0o700 });
+  const eventsFile = options.file || EVENTS_FILE;
   let flushPromise = null;
 
   async function flush() {
@@ -64,6 +65,8 @@ export async function createTelemetry(config) {
       schema_version: 1,
       event_type: raw.event_type,
       timestamp,
+      source: raw.source || 'hedge-router-proxy',
+      gateway: raw.gateway || raw.source || 'hedge-router-proxy',
       install_id: anonymousId(id.installId, `${id.salt}:${month}`),
       session_id: anonymousId(raw.session_id || 'none', `${id.salt}:${month}`),
       request_id: raw.request_id,
@@ -92,7 +95,8 @@ export async function createTelemetry(config) {
       tests_pass: raw.tests_pass ?? null,
       rating: raw.rating ?? null
     };
-    await appendFile(EVENTS_FILE, `${JSON.stringify(event)}\n`, { encoding: 'utf8', mode: 0o600 });
+    await mkdir(path.dirname(eventsFile), { recursive: true, mode: 0o700 });
+    await appendFile(eventsFile, `${JSON.stringify(event)}\n`, { encoding: 'utf8', mode: 0o600 });
     if (config.telemetry.enabled && config.telemetry.remoteUrl) {
       await appendFile(OUTBOX_FILE, `${JSON.stringify(event)}\n`, { encoding: 'utf8', mode: 0o600 });
       void flush().catch(() => {});
@@ -100,7 +104,7 @@ export async function createTelemetry(config) {
     return event;
   }
 
-  return { record, sync: flush, prune: () => pruneEvents(config.telemetry.rawRetentionDays), file: EVENTS_FILE };
+  return { record, sync: flush, prune: () => pruneEvents(config.telemetry.rawRetentionDays, eventsFile), file: eventsFile };
 }
 
 function eventKey(event) {
@@ -142,9 +146,11 @@ async function writeJsonLines(file, events) {
 
 export function savingsReport(events) {
   const requests = events.filter((event) => event.event_type === 'request');
+  const comparable = requests.filter((event) => Number(event.baseline_cost_usd) > 0);
   const outcomes = events.filter((event) => event.event_type === 'outcome');
   const actual = requests.reduce((sum, event) => sum + event.actual_cost_usd, 0);
-  const baseline = requests.reduce((sum, event) => sum + event.baseline_cost_usd, 0);
+  const comparableActual = comparable.reduce((sum, event) => sum + event.actual_cost_usd, 0);
+  const baseline = comparable.reduce((sum, event) => sum + event.baseline_cost_usd, 0);
   const successRatings = outcomes.filter((event) => event.rating != null).map((event) => Number(event.rating) > 0 ? 1 : 0);
   const tests = outcomes.filter((event) => event.tests_pass != null);
   return {
@@ -152,13 +158,60 @@ export function savingsReport(events) {
     sessions: new Set(requests.map((event) => event.session_id)).size,
     actual_cost_usd: actual,
     baseline_cost_usd: baseline,
-    savings_usd: baseline - actual,
-    savings_percent: baseline > 0 ? ((baseline - actual) / baseline) * 100 : 0,
+    savings_usd: baseline - comparableActual,
+    savings_percent: baseline > 0 ? ((baseline - comparableActual) / baseline) * 100 : 0,
     median_latency_ms: median(requests.map((event) => event.latency_ms)),
     p95_routing_overhead_ms: percentile(requests.map((event) => event.routing_overhead_ms || 0), 0.95),
     fallback_rate: requests.length ? requests.filter((event) => event.attempts > 1).length / requests.length : 0,
     positive_rating_rate: mean(successRatings),
     test_pass_rate: tests.length ? tests.filter((event) => event.tests_pass).length / tests.length : 0
+  };
+}
+
+export function usageReport(events) {
+  const requests = events.filter((event) => event.event_type === 'request');
+  const sources = new Map();
+  const models = new Map();
+  for (const event of requests) {
+    const source = event.source || event.gateway || 'unknown';
+    const model = event.model || 'unknown';
+    sources.set(source, (sources.get(source) || 0) + 1);
+    models.set(model, (models.get(model) || 0) + 1);
+  }
+  const savings = savingsReport(events);
+  return {
+    requests: requests.length,
+    sessions: new Set(requests.map((event) => event.session_id)).size,
+    sources: Object.fromEntries([...sources.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))),
+    models: Object.fromEntries([...models.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))),
+    input_tokens: requests.reduce((sum, event) => sum + Number(event.input_tokens || 0), 0),
+    cached_input_tokens: requests.reduce((sum, event) => sum + Number(event.cached_input_tokens || 0), 0),
+    output_tokens: requests.reduce((sum, event) => sum + Number(event.output_tokens || 0), 0),
+    actual_cost_usd: savings.actual_cost_usd,
+    comparable_baseline_cost_usd: savings.baseline_cost_usd,
+    comparable_savings_usd: savings.savings_usd,
+    median_latency_ms: savings.median_latency_ms,
+    error_rate: requests.length ? requests.filter((event) => Number(event.provider_status) >= 400).length / requests.length : 0,
+    fallback_rate: savings.fallback_rate
+  };
+}
+
+export function dataReadinessReport(events) {
+  const requests = events.filter((event) => event.event_type === 'request');
+  const days = new Set(requests.map((event) => String(event.timestamp || '').slice(0, 10)).filter(Boolean)).size;
+  const tokenCoverage = requests.length
+    ? requests.filter((event) => Number(event.input_tokens || 0) + Number(event.output_tokens || 0) > 0).length / requests.length
+    : 0;
+  const costCoverage = requests.length
+    ? requests.filter((event) => Number(event.actual_cost_usd || 0) > 0).length / requests.length
+    : 0;
+  return {
+    ...usageReport(events),
+    contributors: new Set(requests.map((event) => event.install_id).filter(Boolean)).size,
+    observed_days: days,
+    token_coverage: tokenCoverage,
+    cost_coverage: costCoverage,
+    data_gate: requests.length >= 500 && days >= 30 && tokenCoverage >= 0.9
   };
 }
 

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { kalshiFee } from './market.js';
+import { kalshiFee, parseSettlementValue, settlementOutcome } from './market.js';
 
 function finite(value, name, minimum = -Infinity) {
   const number = Number(value);
@@ -175,13 +175,13 @@ export function settlePaperPortfolio({ portfolio, markets, now }) {
     if (order.status !== 'open') return order;
     const market = byId.get(order.market_id);
     const settlementTime = Date.parse(market?.settlementTime || timestamp);
-    if (!market || !Number.isFinite(Number(market.outcomePrice)) ||
+    const outcome = market ? settlementOutcome(market, order.threshold) : null;
+    if (!market || outcome == null ||
         Date.parse(timestamp) < Date.parse(order.close_time) ||
         !Number.isFinite(settlementTime) || settlementTime < Date.parse(order.placed_at)) {
       pending.push(order.market_id);
       return order;
     }
-    const outcome = Number(market.outcomePrice) > Number(order.threshold) ? 1 : 0;
     const winning = order.side === 'yes' ? outcome : 1 - outcome;
     const payout = order.contracts * winning;
     const realizedPnl = roundMoney(payout - order.capital_at_risk);
@@ -189,7 +189,7 @@ export function settlePaperPortfolio({ portfolio, markets, now }) {
       ...order,
       status: 'settled',
       outcome,
-      outcome_price: Number(market.outcomePrice),
+      outcome_price: parseSettlementValue(market.outcomePrice),
       payout,
       realized_pnl: realizedPnl,
       settled_at: market.settlementTime || timestamp

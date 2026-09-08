@@ -1,184 +1,310 @@
 # Hedge Router
 
-> A model router that doesn't just **SAVE** money, but also **MAKES** money by hedging compute prices on Kalshi.
+> Turn model-gateway telemetry into a compute-price hedge.
 
-Hedge Router is a local, bring-your-own-key model router for coding tools. It exposes an OpenAI-compatible endpoint, chooses the least expensive eligible model, records a local savings ledger, and can optionally use privacy-thresholded metadata for compute-price research.
+Hedge Router is not a model router. Use an existing gateway such as
+[Agentgateway](https://agentgateway.dev/) or
+[Weave Router](https://github.com/workweave/router) to choose and serve models.
+Hedge Router consumes their metadata, measures compute exposure, builds a demand
+signal, and evaluates risk-limited paper hedges against compute-price markets.
 
-The routing and research pipeline work today. The market module is deliberately paper-only: the “makes money” thesis must pass its out-of-sample gates before live trading is considered.
+```text
+Agentgateway / Weave Router / any OTLP-capable gateway
+                         ↓
+              metadata-only normalization
+                         ↓
+             daily compute exposure ledger
+                         ↓
+              forecast → paper hedge → P&L
+```
+
+The research pipeline is deliberately paper-only. No command in this repository
+places a live order.
 
 ## Quick start
 
-```sh
-cp hedge-router.config.example.json hedge-router.config.json
-export OPENAI_API_KEY=...
-npm start
-```
-
-Point an OpenAI-compatible client at `http://127.0.0.1:8787/v1` and request model `auto`. Explicit configured model IDs bypass automatic routing.
+The runtime has no third-party dependencies and requires Node 20 or newer.
 
 ```sh
-curl http://127.0.0.1:8787/v1/chat/completions \
-  -H 'content-type: application/json' \
-  -H 'x-hedge-router-session-id: demo' \
-  -d '{"model":"auto","messages":[{"role":"user","content":"Fix the failing test"}]}'
-```
+npm link
+hedge-router init
 
-## Terminal dashboard
+# Weave's /v1/analytics/routing-decisions export is NDJSON.
+hedge-router ingest --format weave --input routing-decisions.ndjson
 
-Open a second terminal while the router is running:
+# Agentgateway JSON access logs and OTLP JSON exports are also supported.
+hedge-router ingest --format agentgateway --input agentgateway.jsonl
+hedge-router ingest --format otel --source agentgateway-prod --input traces.json
 
-```sh
+hedge-router report
+hedge-router aggregate --minimum 1 --output .hedge-router/daily.json
 hedge-router dashboard
 ```
 
-The dashboard watches the local event ledger, `.hedge-router/evaluation.json`, and `.hedge-router/paper.json`. It shows completed routes, fallbacks, per-request savings, model mix, the latest compute-price signal, and persistent Kalshi paper orders. Press `q` to exit.
+Use `--input -` to read stdin, `--dry-run` to validate without writing, and
+`--output FILE` to maintain an alternate ledger. Replaying an export is safe:
+source event IDs are converted into deterministic request IDs and duplicates are
+not appended.
 
-For a deterministic animated feed suitable for demos and terminal recordings:
+Auto-detection works for known shapes:
 
 ```sh
-hedge-router demo --duration 20
+hedge-router ingest --input gateway-export.ndjson
 ```
 
-Both displays say `PAPER EXECUTION` prominently because Hedge Router does not place live orders. Prompts, code, paths, and tool output never appear in the dashboard. Use `--once --no-color` for a static snapshot in logs, or pass `--market FILE` and `--paper FILE` to watch different research files.
+## Supported inputs
+
+### Weave Router
+
+Pull immutable routing decisions with a read-only analytics key, then ingest the
+NDJSON page:
+
+```sh
+curl -sS --compressed \
+  -H "Authorization: Bearer $WEAVE_ANALYTICS_KEY" \
+  "$WEAVE_ROUTER_URL/v1/analytics/routing-decisions?since=2026-08-01T00:00:00Z&limit=10000" \
+  -o routing-decisions.ndjson
+
+hedge-router ingest --format weave --input routing-decisions.ndjson
+```
+
+Hedge Router uses the chosen model/provider, token counts, realized input/output
+cost, route and upstream latency, status, and failover flag. It does not ingest
+end-user identity fields, candidate lists, prompts, or model output. Weave does
+not define savings for you; a baseline is an assumption owned by the operator.
+
+### Agentgateway
+
+Agentgateway emits `gen_ai.*` token/model/provider attributes in access logs and
+OpenTelemetry spans. Configure JSON log output for the simplest file workflow:
+
+```yaml
+config:
+  logging:
+    format: json
+```
+
+```sh
+kubectl logs deployment/agentgateway-proxy -n agentgateway-system \
+  > agentgateway.jsonl
+hedge-router ingest --format agentgateway --input agentgateway.jsonl
+```
+
+The default `key=value` access-log format is accepted too. When Agentgateway has
+a model cost catalog, Hedge Router reads `agw.ai.usage.cost.total`; otherwise it
+still records tokens and operational exposure. OTLP JSON uses the same
+`gen_ai.request.model`, `gen_ai.response.model`, `gen_ai.provider.name`, and
+`gen_ai.usage.*` attributes.
+
+### Claude Code
+
+Local coding-agent transcripts are a usable demand ledger when no gateway sits in
+front of the model:
+
+```sh
+cat ~/.claude/projects/*/*.jsonl \
+  | hedge-router ingest --format claude-code --input -
+```
+
+Only the assistant turn's model, timestamp, and token counts cross the privacy
+boundary. Message content, working directory, git branch, and tool arguments
+recorded in the same transcript are not read into the ledger. Transcripts carry
+no per-call price or latency, so realized spend stays absent rather than zero —
+`report` and `dashboard` show `n/a`, not `$0.00`.
+
+### Generic and canonical inputs
+
+`--format otel` accepts OTLP JSON containing `resourceSpans`. `--format
+canonical` accepts Hedge Router request events for migration and controlled
+imports. The normalized ledger is `.hedge-router/events.ndjson`.
+
+## Exposure pipeline
 
 Useful commands:
 
 ```sh
 hedge-router report
-hedge-router session-outcome --session demo --tests-pass true --rating 1
-hedge-router aggregate --output .hedge-router/daily.json
-hedge-router evaluate --index examples/index.json --markets examples/markets.json \
-  --aggregates examples/aggregates.json --output .hedge-router/evaluation.json
+hedge-router status
+hedge-router aggregate --minimum 1 --output .hedge-router/daily.json
 hedge-router gate --market .hedge-router/evaluation.json
-hedge-router export --output telemetry-export.json
+hedge-router export --output metadata-export.json
 ```
 
-Install the `hedge-router` command locally with `npm link`, or use `node src/cli.js`. A `comp` command alias is included for convenience. The runtime has no third-party dependencies and requires Node 20 or newer.
+`report` summarizes calls, tokens, realized spend, gateway/model mix, latency,
+errors, and failovers. `aggregate` produces daily demand features used by the
+forecast: request volume, input/output tokens, cache ratio, latency, error rate,
+and failover rate. A local single-user study can use `--minimum 1`; shared or
+remote studies should retain the configured privacy threshold.
+
+`status` prints a compact line such as `hedge router · spend $1.25 · 1.5M tokens
+· paper +$0.42`. A companion plugin for Claude Code, Codex, and OpenCode lives in
+[`plugins/hedge-router-status`](plugins/hedge-router-status/README.md).
+
+`hedge-router demo` renders the same dashboard without a local ledger. It is a
+recording, not a simulation: the gateway rows are real ingested requests and the
+hedges, Brier scores, and P&L are exactly what
+[`backtest`](#retrospective-backtest) produced, losses included. The demo cannot
+display an open gate, because the research has not earned one.
 
 ## Privacy boundary
 
-Prompts, code, paths, filenames, tool arguments, and tool output are never written to telemetry or sent to the optional telemetry collector. Only request metadata, token counts, latency, provider errors, coarse task class, price snapshots, routing decisions, and explicit quality outcomes are eligible. Telemetry is off by default. Provider-bound request content still goes to the provider selected by the user-configured router.
+Normalization is an allowlist, not a raw-log archive. Prompts, completions, code,
+paths, filenames, tool arguments, tool output, credentials, email addresses, and
+gateway user IDs are never written to the exposure ledger. Session identifiers
+are pseudonymized with a rotating local salt. Telemetry upload is off by default.
 
-Run `hedge-router delete-data --confirm DELETE` to remove the local event ledger and pseudonymous identity. When remote telemetry is configured, deletion is sent to the collector before local state is removed. Failed uploads stay in a durable, metadata-only outbox and can be retried with `hedge-router sync`.
+Run `hedge-router delete-data --confirm DELETE` to remove the local event ledger
+and pseudonymous identity. Failed optional uploads stay in a durable,
+metadata-only outbox and can be retried with `hedge-router sync`.
 
-The optional collector is a separate authenticated service:
+The optional authenticated collector accepts only the normalized metadata
+allowlist, deduplicates request IDs, enforces retention, and exposes aggregates
+only after the configured cohort threshold:
 
 ```sh
 export HEDGE_ROUTER_COLLECTOR_TOKEN='replace-with-at-least-16-random-characters'
 hedge-router collect --config hedge-router.config.json
 ```
 
-Set `telemetry.remoteEnabled`, `telemetry.remoteUrl`, and `telemetry.remoteTokenEnv` in the client config. The collector rejects unknown fields and content-like fields, deduplicates request IDs, applies retention, and only exposes aggregates after the configured minimum cohort size.
+## Paper-hedge research
 
-## Routing behavior
-
-- `model: "auto"` selects the cheapest model that fits the estimated context and requested quality tier.
-- `x-hedge-router-quality: economy|balanced|high` overrides the local quality preference.
-- `x-hedge-router-task-class` can supply a coarse category; otherwise it is derived locally and only the category is recorded.
-- A stable randomized control cohort uses the configured default model.
-- Local latency and provider-error history break near-cost ties and temporarily deprioritize routes with at least a 20% error rate over five or more samples.
-- Retryable upstream failures escalate to the next eligible quality tier before any response bytes reach the client.
-- Each provider attempt has a configurable timeout (120 seconds by default).
-- OpenAI-only Responses features (including built-in tools, stored conversations, and background mode) remain on an OpenAI-backed route instead of being lossy-translated.
-
-The `x-hedge-router-route`, `x-hedge-router-session-id`, and `x-hedge-router-request-id` response headers make routing auditable.
-
-## Market research
-
-The evaluator uses horizon-matched walk-forward ridge regression and never places a live order. It is testing whether privacy-thresholded usage metadata adds predictive value beyond the last observed index value and the market price. It will not generate an order until aligned router aggregates and the configured minimum number of training rows exist. Live trading is intentionally absent pending legal, privacy, security, and exchange-rule review.
-
-An end-to-end public-data workflow is available:
+The evaluator uses horizon-matched walk-forward ridge regression to test whether
+gateway demand metadata adds predictive value beyond the last observed index and
+the public market price. It never trains on data observed after the forecast.
 
 ```sh
-# 1. Capture prices while the contracts are still open.
+# Capture executable market prices before close.
 hedge-router kalshi-snapshot --series KXH100WS --chip H100 \
   --fee-rate 0.07 --slippage 0.01 --output .hedge-router/kalshi-open.json
 
-# 2. Refresh the corresponding public compute-price history.
+# Refresh the public compute-price index.
 hedge-router ornn-history --gpu H100 --chip H100 \
   --start 2026-06-01 --end 2026-08-28 \
   --merge .hedge-router/ornn-h100.json --output .hedge-router/ornn-h100.json
 
-# 3. Build privacy-thresholded router features.
-hedge-router aggregate --output .hedge-router/daily.json
+# The token-price index, for a bill denominated in tokens rather than GPU-hours.
+# Free for four labs over a trailing month; the command reports what was withheld.
+hedge-router otpi-history --lab anthropic --chip ANTHROPIC-TOK \
+  --start 2026-08-08 --end 2026-09-07 --output .hedge-router/otpi-anthropic.json
 
-# 4. Within five minutes of the market snapshot, record risk-limited paper orders.
+# Build demand features from any supported gateway.
+hedge-router aggregate --minimum 1 --output .hedge-router/daily.json
+
+# Record fresh, trained, risk-limited paper orders.
 hedge-router paper-open --index .hedge-router/ornn-h100.json \
   --markets .hedge-router/kalshi-open.json --aggregates .hedge-router/daily.json \
   --portfolio .hedge-router/paper.json --output .hedge-router/paper.json \
   --bankroll 1000 --risk-percent 1 --max-event-percent 5
 
-# 5. After settlement, attach outcomes without replacing the entry-time quotes.
+# Resolve and settle without replacing the entry-time snapshot.
 hedge-router kalshi-resolve \
   --input .hedge-router/kalshi-open.json --output .hedge-router/kalshi-resolved.json
 hedge-router paper-settle --portfolio .hedge-router/paper.json \
   --markets .hedge-router/kalshi-resolved.json --output .hedge-router/paper.json
 
-# 6. Evaluate the research history strictly out of sample.
+# Evaluate strictly out of sample.
 hedge-router evaluate --index .hedge-router/ornn-h100.json \
   --markets .hedge-router/kalshi-resolved.json --aggregates .hedge-router/daily.json \
   --output .hedge-router/evaluation.json
 hedge-router gate --market .hedge-router/evaluation.json
 ```
 
-`kalshi-snapshot` uses Kalshi's unauthenticated market-data API, captures executable Yes and No asks, and rejects observations at or after contract close. Paper placement also rejects stale snapshots, duplicate markets, and positions outside the bankroll or per-event exposure limits. `kalshi-resolve` preserves the entry-time quotes, so settlement data cannot leak into the prediction. `ornn-history` normalizes the public Ornn index history for H100, H200, B200, A100, and RTX 5090 into evaluator-ready rows. Keep imported index data local unless your license permits redistribution.
+The market gate requires at least 30 independent settlement events, a 5%
+out-of-sample Brier-score improvement over both the market and last-price
+baselines, and positive paper P&L after fees and slippage. The independent data
+gate requires at least 500 calls spanning 30 days with token coverage of 90% or
+better. Insufficient data never becomes a pass.
 
-The default event-contract taker fee is calculated per trade as `ceil(0.07 × contracts × price × (1-price))` in cents, following Kalshi's published [fee schedule](https://kalshi.com/docs/kalshi-fee-schedule.pdf). Use `--fee-rate` or the legacy fixed `--fee` override when a product has a different schedule. Modeled slippage is separate.
+The relevant contracts settle on a stated compute-price index crossing a
+threshold. They hedge a customer only when that customer's real compute costs
+move with the same index. The pilot reports this basis risk as unmeasured until it
+can be estimated from actual cost history.
+
+A $/token contract would shorten that chain, and Kalshi listed four in August
+2026. [`docs/token-price-basis.md`](docs/token-price-basis.md) records what
+measuring them found: the settlement rule is reproducible exactly from the free
+public index, but the index is a volume-weighted *mix* blend with 235–289%
+annualized volatility and no autocorrelation, so almost none of its variance is
+price. A consumer with a fixed model mix has no exposure to it. All 87 markets are
+settled with 4,779 contracts of lifetime volume.
+
+### Retrospective backtest
+
+Forward paper trading accumulates one settlement event per week. `backtest`
+reconstructs the decision that *would* have been made on already-settled markets
+by reading Kalshi daily candlesticks, so a hypothesis can be falsified today
+rather than next year. Each market is entered at the historical `yes_ask` (or
+`no_ask`) that existed `--lead-days` before close, plus fees and slippage; quotes
+that were one-sided, crossed, or published after the decision time are skipped
+with a stated reason rather than filled at a midpoint.
+
+```sh
+hedge-router backtest --series KXH100WS --chip H100 \
+  --index .hedge-router/ornn-h100.json --aggregates .hedge-router/daily.json \
+  --lead-days 1,3,7,14 --fee-rate 0.07 --slippage 0.01 \
+  --save-history .hedge-router/kalshi-history.json \
+  --output .hedge-router/backtest.json
+```
+
+`--save-history` caches the fetched candlesticks; pass it back with `--history`
+to re-run offline without re-hitting the API. Two variants share one forecast:
+`demand-signal` trades only where the demand model has trained, and
+`index-persistence` trades on the last index print alone. The difference between
+them, `demand_brier_lift`, is the only number that measures whether gateway
+telemetry adds anything.
+
+#### What it currently measures
+
+On `KXH100WS` (102 settled markets, **10 independent settlement events**, first
+settlement 2026-07-03) against the Ornn H100 SXM index:
+
+| lead | demand lift | signal Brier | market Brier | index Brier | demand P&L | persistence P&L |
+| ---: | ----------: | -----------: | -----------: | ----------: | ---------: | --------------: |
+|   1d |     −0.0012 |       0.0499 |       0.0573 |      0.0486 | −$0.78 (3) |     +$0.56 (8)  |
+|   3d |     −0.0022 |       0.0421 |       0.0402 |      0.0399 | +$0.20 (2) |     −$0.28 (10) |
+|   7d |           0 |       0.0332 |       0.0422 |      0.0332 |   — (0)    |     +$1.41 (7)  |
+|  14d |           0 |       0.0347 |       0.0533 |      0.0347 |   — (0)    |     +$2.09 (9)  |
+
+The core hypothesis is **not** supported on this data. Where the demand model
+trains at all, it makes forecasts slightly *worse* than the last index price. At
+7 and 14 days no aligned aggregate reaches back far enough to train, so the
+demand variant is the index variant with no trades. The persistence variant is
+profitable at three of four leads, but on 7–10 trades across 8–10 correlated
+events that is noise, not evidence. Of the fixed baselines, only
+`market-favorite` makes money, and only at longer leads.
+
+The one pattern that repeats at every lead is that the index's own persistence
+beats the market's implied probability (Brier 0.033–0.049 against 0.040–0.057).
+That is a statement about this thin market, not about demand telemetry.
+
+At one settlement event per week, the 30-event market gate cannot be evaluated
+before roughly March 2027. Until then `gate` reports collecting, which is the
+honest answer.
 
 ### Automated pilot
-
-Run the complete workflow once:
 
 ```sh
 hedge-router pilot-run --series KXH100WS --gpu H100 --chip H100 \
   --minimum-contributors 1
-```
 
-For a private single-user experiment, `--minimum-contributors 1` permits local aggregates. Keep the configured privacy threshold for any multi-user pilot.
-
-The cycle is locked against overlapping runs and performs these operations in order:
-
-1. Refresh and merge the Ornn index history.
-2. Build privacy-thresholded daily router aggregates.
-3. Retry settlement of contracts captured by earlier runs.
-4. Settle matching paper positions and update realized P&L.
-5. Capture and archive current executable Kalshi quotes.
-6. Forecast at each contract's actual time horizon.
-7. Place only fresh, trained, risk-limited paper orders.
-8. Refresh the evaluation and append an immutable run summary.
-
-Run it continuously in the foreground every 24 hours:
-
-```sh
 hedge-router pilot-daemon --series KXH100WS --gpu H100 --chip H100 \
   --minimum-contributors 1 --interval-hours 24
-```
 
-For a deployed pilot, invoke `pilot-run` from a process manager or operating-system scheduler instead of relying on an unattended terminal. Each run is resumable: pending markets, resolved history, paper orders, daily aggregates, index history, archived snapshots, and run logs live under `.hedge-router/`. Overlapping cycles are rejected; a lock abandoned for more than six hours is recovered automatically.
-
-Produce the weekly falsification scorecard:
-
-```sh
 hedge-router pilot-report --chip H100 --days 7 \
   --output .hedge-router/pilot/weekly.json
 ```
 
-The scorecard reports collection failures, routing savings and quality, independent market events, Brier improvement, portfolio results, and the still-unmeasured basis risk. Its verdict is `collecting`, `passed`, or `failed`; insufficient data never becomes a pass.
+Each cycle is resumable and locked against overlap. It refreshes index history,
+aggregates gateway exposure, settles prior paper positions, captures fresh market
+quotes, forecasts at each contract's actual horizon, places qualifying paper
+orders, and writes an immutable run summary.
 
-Because the public history window is limited, preserve an accumulating local series during later refreshes with `--merge .hedge-router/ornn-h100.json --output .hedge-router/ornn-h100.json`. Fresh same-day observations replace older ones; older dates remain intact.
+## Optional legacy proxy
 
-The files in `examples/` are synthetic and document the input shapes:
-
-- Index rows contain `date`, an exact `chip` series name, and the observed `price` from the contract's stated settlement source.
-- Market rows contain the contract ID, settlement date, chip, threshold, normalized Yes price, per-contract fee, modeled slippage, and resolved index price.
-- Aggregate rows are produced by `hedge-router aggregate` only after the configured minimum contributor count is met.
-
-The market gate requires at least 30 distinct settlement events—not merely 30 correlated strikes—a 5% out-of-sample Brier-score improvement over both the public-market and last-price baselines, and positive paper P&L after fees and slippage. The router gate requires 500 completed sessions from 25 contributors, at least 20% savings, no more than five percentage points of quality degradation against the control cohort, and less than 100 ms p95 local routing overhead.
+The original OpenAI-compatible router remains available as a demo and migration
+aid under `hedge-router serve`, but it is no longer the product boundary or the
+default configuration. A complete configuration is available at
+[`examples/legacy-proxy.config.json`](examples/legacy-proxy.config.json). Provider
+credentials are required only for this optional command.
 
 This software is experimental and is not investment advice.
-
-## What this can and cannot hedge
-
-The relevant Kalshi contracts settle on a stated compute-price index crossing a threshold; they are not bets on a GPU literally running faster or slower. A coding-session router lowers the user's API bill immediately. Aggregated usage could become an early demand signal, but it is only a hedge if the user's real compute costs reliably move with the same settlement index. Until that relationship survives the independent gates above, the market side should be treated as research rather than a customer promise.
-
-API behavior was implemented against the official [OpenAI Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create), [Kalshi market-data documentation](https://docs.kalshi.com/getting_started/quick_start_market_data), and [Ornn API documentation](https://index.ornn.com/docs).

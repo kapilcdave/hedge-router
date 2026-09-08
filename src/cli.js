@@ -3,16 +3,19 @@ import { copyFile, readFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadConfig } from './config.js';
+import { loadSeriesHistory, runBacktest } from './backtest.js';
+import { loadConfig, validateProxyConfig } from './config.js';
 import { startCollector } from './collector.js';
 import { runDashboard } from './dashboard.js';
 import { createKalshiSnapshots, resolveKalshiSnapshots } from './kalshi.js';
+import { normalizeGatewayExport } from './ingest.js';
 import { evaluateMarkets, forecastMarkets } from './market.js';
-import { fetchOrnnIndex, mergeOrnnIndex } from './ornn.js';
+import { fetchOrnnIndex, fetchOrnnTokenIndex, mergeOrnnIndex, otpiCoverage } from './ornn.js';
 import { createPaperPortfolio, placePaperOrders, settlePaperPortfolio } from './paper.js';
 import { pilotPaths, runPilotCycle, weeklyPilotReport } from './pilot.js';
 import { startServer } from './server.js';
-import { aggregateDaily, createTelemetry, deleteLocalTelemetry, deleteRemoteTelemetry, experimentReport, loadEvents, savingsReport } from './telemetry.js';
+import { loadStatusLine } from './status.js';
+import { aggregateDaily, createTelemetry, dataReadinessReport, deleteLocalTelemetry, deleteRemoteTelemetry, loadEvents, usageReport } from './telemetry.js';
 import { DATA_DIR, parseBoolean, readJson, writeJsonAtomic } from './utils.js';
 
 function parseArgs(values) {
@@ -40,6 +43,12 @@ async function optionalJson(file) {
   }
 }
 
+async function readStdin() {
+  const chunks = [];
+  for await (const chunk of process.stdin) chunks.push(chunk);
+  return Buffer.concat(chunks).toString('utf8');
+}
+
 async function runCommand(command) {
   return new Promise((resolve) => {
     const child = spawn(command, { shell: true, stdio: 'inherit' });
@@ -49,6 +58,7 @@ async function runCommand(command) {
 
 async function commandServe(args) {
   const { config, file } = await loadConfig(args.config);
+  validateProxyConfig(config);
   const server = await startServer(config);
   print(`Hedge Router listening on http://${config.server.host}:${config.server.port} (config: ${file})`);
   const close = () => server.close(() => process.exit(0));
@@ -67,7 +77,36 @@ async function commandCollect(args) {
 
 async function commandReport(args) {
   const events = await loadEvents(args.events);
-  print(savingsReport(events));
+  print(usageReport(events));
+}
+
+async function commandIngest(args) {
+  if (!args.input) throw new Error('--input is required (use - for stdin)');
+  const source = args.input === '-'
+    ? await readStdin()
+    : await readFile(path.resolve(args.input), 'utf8');
+  const normalized = normalizeGatewayExport(source, { format: args.format || 'auto', source: args.source });
+  const output = path.resolve(args.output || path.join(DATA_DIR, 'events.ndjson'));
+  const seen = new Set((await loadEvents(output)).map((event) => event.request_id).filter(Boolean));
+  const fresh = normalized.events.filter((event) => {
+    if (seen.has(event.request_id)) return false;
+    seen.add(event.request_id);
+    return true;
+  });
+  if (!args['dry-run']) {
+    const { config } = await loadConfig(args.config);
+    const telemetry = await createTelemetry(config, { file: output });
+    for (const event of fresh) await telemetry.record(event);
+  }
+  print({
+    input: args.input, output, formats: normalized.formats, rows: normalized.rows,
+    accepted: fresh.length, duplicates: normalized.events.length - fresh.length,
+    skipped: normalized.skipped, dry_run: Boolean(args['dry-run'])
+  });
+}
+
+async function commandStatus(args) {
+  print(await loadStatusLine({ eventsFile: args.events, paperFile: args.paper, marketFile: args.market }));
 }
 
 async function commandDashboard(args, demo = false) {
@@ -242,12 +281,59 @@ async function commandOrnnHistory(args) {
   print({ output: path.resolve(args.output), imported: imported.length, rows: rows.length, gpu: imported[0]?.sourceGpu || args.gpu });
 }
 
+async function commandOtpiHistory(args) {
+  if (!args.lab || !args.start || !args.end || !args.output) {
+    throw new Error('--lab, --start, --end, and --output are required');
+  }
+  const imported = await fetchOrnnTokenIndex({
+    lab: args.lab, chip: args.chip, startDate: args.start, endDate: args.end,
+    // A key stays in the environment. Writing it into a config file in the tree is how it leaks.
+    apiKey: process.env.ORNN_API_KEY || undefined
+  });
+  const rows = args.merge
+    ? mergeOrnnIndex(await readJson(path.resolve(args.merge)), imported)
+    : imported;
+  await writeJsonAtomic(path.resolve(args.output), rows);
+  const coverage = otpiCoverage({ rows: imported, startDate: args.start, endDate: args.end });
+  print({
+    output: path.resolve(args.output), lab: imported[0].lab, chip: imported[0].chip,
+    unit: imported[0].unit, rows: rows.length, ...coverage,
+    // Say it out loud: on the free tier a wider request comes back narrowed, not empty.
+    note: coverage.clamped
+      ? `${coverage.access} withheld ${args.start}→${coverage.covered.from}; set ORNN_API_KEY for full history`
+      : undefined
+  });
+}
+
+async function commandBacktest(args) {
+  if (!args.series || !args.chip || !args.index) throw new Error('--series, --chip, and --index are required');
+  const leadDays = String(args['lead-days'] ?? '7').split(',').map((value) => Number(value.trim()));
+  if (leadDays.some((value) => !Number.isFinite(value) || value <= 0)) throw new Error('--lead-days must be positive numbers');
+  const series = String(args.series).toUpperCase();
+  const index = await readJson(path.resolve(args.index));
+  const aggregates = args.aggregates ? await readJson(path.resolve(args.aggregates)) : [];
+  const history = args.history
+    ? await readJson(path.resolve(args.history))
+    : await loadSeriesHistory({ series });
+  if (args['save-history']) await writeJsonAtomic(path.resolve(args['save-history']), history);
+  const report = await runBacktest({
+    series, chip: String(args.chip).toUpperCase(), index, aggregates, history, leadDays,
+    feeRate: Number(args['fee-rate'] ?? 0.07),
+    feePerContract: args.fee == null ? null : Number(args.fee),
+    slippage: Number(args.slippage ?? 0.01),
+    minimumTraining: Number(args['minimum-training'] ?? 5),
+    edge: Number(args.edge ?? 0.05)
+  });
+  if (args.output) await writeJsonAtomic(path.resolve(args.output), report);
+  else print(report);
+}
+
 async function commandGate(args) {
-  const router = experimentReport(await loadEvents(args.events));
+  const data = dataReadinessReport(await loadEvents(args.events));
   const market = args.market ? await readJson(path.resolve(args.market)) : null;
   print({
-    combined_gate: Boolean(router.router_gate && market?.gate),
-    router,
+    combined_gate: Boolean(data.data_gate && market?.gate),
+    data,
     market: market ? {
       gate: Boolean(market.gate),
       observations: market.observations,
@@ -301,13 +387,18 @@ function help() {
 
 Commands:
   init [--output FILE]               Create a starter configuration
-  serve [--config FILE]              Start the local proxy
+  ingest --input FILE [--format auto|agentgateway|weave|otel|canonical]
+    [--source NAME] [--output FILE] [--dry-run]
+                                     Normalize gateway metadata into the exposure ledger
+  serve [--config FILE]              Start the optional legacy demo proxy
   dashboard [--events FILE] [--market FILE] [--paper FILE]
-    [--refresh-ms N] [--once]        Watch live routes and paper hedges
-  demo [--duration SEC] [--frames N] Show a deterministic, recordable feed
+    [--refresh-ms N] [--once]        Watch gateway exposure and paper hedges
+  demo [--duration SEC] [--frames N] Replay a recorded backtest, results as measured
     [--refresh-ms N] [--no-color]
-  collect [--config FILE]            Start the authenticated telemetry collector
-  report [--events FILE]             Show cost, savings, latency, and quality metrics
+  collect [--config FILE]            Start the authenticated metadata collector
+  report [--events FILE]             Show compute usage, spend, and source coverage
+  status [--events FILE] [--paper FILE] [--market FILE]
+                                     Print a compact status line for coding tools
   session-outcome --session ID       Record tests and rating metadata
     [--tests-pass BOOL] [--rating -1|0|1] [--run-checks]
   aggregate [--events FILE]          Create privacy-thresholded daily features
@@ -335,10 +426,15 @@ Commands:
   kalshi-resolve --input FILE --output FILE
                                      Resolve captured snapshots after settlement
   ornn-history --gpu GPU --chip CHIP --start YYYY-MM-DD --end YYYY-MM-DD --output FILE
+  otpi-history --lab LAB --start YYYY-MM-DD --end YYYY-MM-DD --output FILE
                                      Download an Ornn GPU index series
     [--merge EXISTING_FILE]          Preserve older rows while refreshing history
+  backtest --series TICKER --chip CHIP --index FILE
+    [--aggregates FILE] [--lead-days 1,3,7] [--fee-rate N] [--slippage USD]
+    [--edge N] [--history FILE] [--save-history FILE] [--output FILE]
+                                     Replay settled markets from historical quotes
   gate [--events FILE] [--market EVALUATION_FILE]
-                                     Check independent router and market gates
+                                     Check independent data and market gates
   export --output FILE               Export sanitized local telemetry as JSON
   sync [--config FILE]               Retry the durable telemetry outbox
   delete-data --confirm DELETE       Delete remote and local telemetry
@@ -349,11 +445,13 @@ Commands:
 async function main() {
   const [command = 'help', ...values] = process.argv.slice(2);
   const args = parseArgs(values);
-  if (command === 'serve') await commandServe(args);
+  if (command === 'ingest') await commandIngest(args);
+  else if (command === 'serve') await commandServe(args);
   else if (command === 'dashboard') await commandDashboard(args);
   else if (command === 'demo') await commandDashboard(args, true);
   else if (command === 'collect') await commandCollect(args);
   else if (command === 'report') await commandReport(args);
+  else if (command === 'status') await commandStatus(args);
   else if (command === 'session-outcome') await commandOutcome(args);
   else if (command === 'aggregate') await commandAggregate(args);
   else if (command === 'evaluate') await commandEvaluate(args);
@@ -365,6 +463,8 @@ async function main() {
   else if (command === 'kalshi-snapshot') await commandKalshiSnapshot(args);
   else if (command === 'kalshi-resolve') await commandKalshiResolve(args);
   else if (command === 'ornn-history') await commandOrnnHistory(args);
+  else if (command === 'otpi-history') await commandOtpiHistory(args);
+  else if (command === 'backtest') await commandBacktest(args);
   else if (command === 'gate') await commandGate(args);
   else if (command === 'export') await commandExport(args);
   else if (command === 'sync') await commandSync(args);

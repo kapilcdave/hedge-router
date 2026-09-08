@@ -4,7 +4,7 @@ import { createKalshiSnapshots, resolveKalshiSnapshots } from './kalshi.js';
 import { evaluateMarkets, forecastMarkets } from './market.js';
 import { fetchOrnnIndex, mergeOrnnIndex } from './ornn.js';
 import { createPaperPortfolio, placePaperOrders, settlePaperPortfolio } from './paper.js';
-import { aggregateDaily, experimentReport, loadEvents } from './telemetry.js';
+import { aggregateDaily, dataReadinessReport, loadEvents } from './telemetry.js';
 import { DATA_DIR, readJson, writeJsonAtomic } from './utils.js';
 
 function slug(value) {
@@ -226,16 +226,16 @@ export function weeklyPilotReport({ runs, portfolio, evaluation, events, now, da
   const generatedAt = now || new Date().toISOString();
   const cutoff = Date.parse(generatedAt) - Number(days) * 86_400_000;
   const recentRuns = (runs || []).filter((run) => Date.parse(run.run_at) >= cutoff && Date.parse(run.run_at) <= Date.parse(generatedAt));
-  const router = experimentReport(events || []);
+  const data = dataReadinessReport(events || []);
   const orders = Array.isArray(portfolio?.orders) ? portfolio.orders : [];
   const settled = orders.filter((order) => order.status === 'settled' && Date.parse(order.settled_at) >= cutoff);
   const wins = settled.filter((order) => order.realized_pnl > 0).length;
   const marketMature = Number(evaluation?.independent_events || 0) >= 30;
-  const routerMature = router.completed_sessions >= 500 && router.contributors >= 25;
+  const dataMature = data.requests >= 500 && data.observed_days >= 30;
   const failures = [];
-  if (routerMature && !router.router_gate) failures.push('router gate failed after reaching sample minimums');
+  if (dataMature && !data.data_gate) failures.push('gateway data gate failed after reaching sample minimums');
   if (marketMature && !evaluation?.gate) failures.push('market gate failed after reaching 30 independent events');
-  const verdict = router.router_gate && evaluation?.gate ? 'passed' : failures.length ? 'failed' : 'collecting';
+  const verdict = data.data_gate && evaluation?.gate ? 'passed' : failures.length ? 'failed' : 'collecting';
   const runErrors = recentRuns.flatMap((run) => run.errors || []);
   return {
     generated_at: generatedAt,
@@ -249,14 +249,15 @@ export function weeklyPilotReport({ runs, portfolio, evaluation, events, now, da
       signal_ready_runs: recentRuns.filter((run) => Number(run.signals?.ready || 0) > 0).length,
       errors: runErrors
     },
-    router: {
-      gate: router.router_gate,
-      mature: routerMature,
-      sessions: router.completed_sessions,
-      contributors: router.contributors,
-      savings_percent: router.savings_percent,
-      quality_degradation: router.quality_degradation,
-      p95_routing_overhead_ms: router.p95_routing_overhead_ms
+    data: {
+      gate: data.data_gate,
+      mature: dataMature,
+      requests: data.requests,
+      observed_days: data.observed_days,
+      contributors: data.contributors,
+      token_coverage: data.token_coverage,
+      cost_coverage: data.cost_coverage,
+      actual_cost_usd: data.actual_cost_usd
     },
     market: {
       gate: Boolean(evaluation?.gate),
@@ -278,7 +279,7 @@ export function weeklyPilotReport({ runs, portfolio, evaluation, events, now, da
       failures,
       basis_risk: 'not_measured',
       blockers: [
-        ...(!routerMature ? ['router sample minimum not reached'] : []),
+        ...(!dataMature ? ['gateway data sample minimum not reached'] : []),
         ...(!marketMature ? ['30 independent settlement events not reached'] : []),
         'actual customer cost versus settlement-index basis risk not measured'
       ]

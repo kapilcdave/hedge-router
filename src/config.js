@@ -36,7 +36,6 @@ function assert(condition, message) {
 export function validateConfig(config) {
   assert(['127.0.0.1', '::1', 'localhost'].includes(config.server.host),
     'server.host must be loopback; the proxy intentionally has no remote-listen mode');
-  assert(config.models.length > 0, 'at least one model is required');
   const ids = new Set();
   for (const model of config.models) {
     assert(model.id && !ids.has(model.id), `model id must be unique: ${model.id}`);
@@ -49,7 +48,9 @@ export function validateConfig(config) {
     assert(Number.isFinite(model.contextWindow), `${model.id} requires contextWindow`);
     assert([1, 2, 3].includes(model.qualityTier), `${model.id} qualityTier must be 1, 2, or 3`);
   }
-  assert(ids.has(config.routing.defaultModel), 'routing.defaultModel must name a configured model');
+  if (config.models.length || config.routing.defaultModel) {
+    assert(ids.has(config.routing.defaultModel), 'routing.defaultModel must name a configured model');
+  }
   assert(config.routing.controlPercent >= 0 && config.routing.controlPercent <= 100,
     'routing.controlPercent must be between 0 and 100');
   assert(Number.isInteger(config.routing.maxAttempts) && config.routing.maxAttempts >= 1,
@@ -67,6 +68,12 @@ export function validateConfig(config) {
     'collector.port must be a valid TCP port');
   assert(config.collector.minimumCohort >= 2, 'collector.minimumCohort must be at least 2');
   assert(config.collector.rawRetentionDays >= 1, 'collector.rawRetentionDays must be positive');
+  return config;
+}
+
+export function validateProxyConfig(config) {
+  validateConfig(config);
+  assert(config.models.length > 0, 'the optional proxy requires at least one model');
   return config;
 }
 

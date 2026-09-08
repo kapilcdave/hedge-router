@@ -1,3 +1,4 @@
+import { parseSettlementValue, settlementOutcome } from './market.js';
 import { clamp } from './utils.js';
 
 const DEFAULT_BASE_URL = 'https://external-api.kalshi.com/trade-api/v2';
@@ -122,8 +123,9 @@ export async function resolveKalshiSnapshots(snapshotDocument, options = {}) {
       pending.push(snapshot.id);
       continue;
     }
-    const outcomePrice = Number(market.expiration_value);
-    if (!Number.isFinite(outcomePrice)) {
+    const outcomePrice = parseSettlementValue(market.expiration_value);
+    const settled = { ...market, outcomePrice, result: market.result };
+    if (settlementOutcome(settled, snapshot.threshold) == null) {
       pending.push(snapshot.id);
       continue;
     }

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { validateConfig } from '../src/config.js';
+import { validateConfig, validateProxyConfig } from '../src/config.js';
 
 function config(overrides = {}) {
   return {
@@ -23,4 +23,10 @@ test('configuration refuses a remotely exposed unauthenticated proxy', () => {
 test('configuration requires TLS for nonlocal telemetry', () => {
   assert.throws(() => validateConfig(config({ telemetry: { minimumCohort: 20, remoteUrl: 'http://collector.example/events' } })), /HTTPS/);
   assert.doesNotThrow(() => validateConfig(config({ telemetry: { minimumCohort: 20, remoteUrl: 'https://collector.example/events' } })));
+});
+
+test('hedge ingestion needs no model catalog while the optional proxy still does', () => {
+  const ingestion = config({ models: [], routing: { defaultModel: null, controlPercent: 10, maxAttempts: 2, requestTimeoutMs: 120000 } });
+  assert.doesNotThrow(() => validateConfig(ingestion));
+  assert.throws(() => validateProxyConfig(ingestion), /optional proxy requires at least one model/);
 });

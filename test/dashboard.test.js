@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildDashboardState, createDemoState, renderDashboard } from '../src/dashboard.js';
+import { buildDashboardState, createDemoState, demoSettledFrame, renderDashboard } from '../src/dashboard.js';
+import { DEMO_RECORDING } from '../src/demo-data.js';
 
 function request(overrides = {}) {
   return {
@@ -11,7 +12,7 @@ function request(overrides = {}) {
   };
 }
 
-test('dashboard renders routing, model mix, and explicitly paper hedges', () => {
+test('dashboard renders gateway exposure, model mix, and explicitly paper hedges', () => {
   const market = {
     paper_pnl: 0.09, gate: false, results: [{
       id: 'KXH100WS-3.000', chip: 'H100', threshold: 3,
@@ -20,8 +21,8 @@ test('dashboard renders routing, model mix, and explicitly paper hedges', () => 
     }]
   };
   const view = renderDashboard(buildDashboardState([request()], market), { color: false, width: 100 });
-  assert.match(view, /HEDGE ROUTER/);
-  assert.match(view, /LIVE ROUTING/);
+  assert.match(view, /hedge router/);
+  assert.match(view, /LIVE GATEWAY DATA/);
   assert.match(view, /openai\/gpt-5-mini/);
   assert.match(view, /KALSHI PAPER HEDGES/);
   assert.match(view, /PAPER\s+KXH100WS-3\.000/);
@@ -31,23 +32,75 @@ test('dashboard renders routing, model mix, and explicitly paper hedges', () => 
   assert.ok(narrow.split('\n').every((line) => line.length === 68));
 });
 
-test('demo feed is deterministic and becomes gate-open', () => {
+test('demo feed replays recorded results and never claims an open gate', () => {
   const early = createDemoState(0);
   const later = createDemoState(9);
-  assert.equal(createDemoState(3).report.savings_usd, createDemoState(3).report.savings_usd);
+  assert.equal(createDemoState(3).report.actual_cost_usd, createDemoState(3).report.actual_cost_usd);
   assert.ok(later.report.requests > early.report.requests);
   assert.equal(later.mode, 'demo');
-  assert.equal(later.market.gate, true);
   assert.ok(later.hedges.length >= early.hedges.length);
+  // The recording carries the real backtest verdict: 10 settlement events against a 30-event
+  // requirement, and a losing paper book. No frame may render this as a pass.
+  for (const frame of [0, 3, 6, 9, 12, 30]) {
+    const state = createDemoState(frame);
+    assert.equal(state.market.gate, false);
+    assert.equal(state.market.independent_events, DEMO_RECORDING.market.independent_events);
+    const view = renderDashboard(state, { color: false, width: 100 });
+    assert.doesNotMatch(view, /GATE OPEN/);
+    assert.ok(view.split('\n').every((line) => line.length === 100));
+  }
+  assert.equal(later.market.paper_pnl, -0.78);
 });
 
-test('failed and fallback routes have visible operational status', () => {
+test('demo shows unreported cost and latency as n/a rather than zero', () => {
+  const view = renderDashboard(createDemoState(9), { color: false, width: 100 });
+  // Claude Code transcripts carry no per-call price or latency; a silent source is not a free one.
+  assert.match(view, /COMPUTE SPEND\s+n\/a/);
+  assert.match(view, /claude-code.+n\/a.+n\/a/);
+  assert.doesNotMatch(view, /\$0\.00\s+0ms/);
+});
+
+test('a single-frame render shows the settled recording, not an empty first frame', () => {
+  // A pipe or a redirect renders one frame. Frame 0 has revealed no market rows, so rendering it
+  // would put an empty signal panel and $0.00 in front of anyone who pastes demo output anywhere.
+  const settled = createDemoState(demoSettledFrame());
+  assert.equal(settled.hedges.length, DEMO_RECORDING.market.results.length);
+  assert.equal(settled.market.paper_pnl, DEMO_RECORDING.market.paper_pnl);
+  const view = renderDashboard(settled, { color: false, width: 100 });
+  assert.match(view, /PAPER P&L\s+-\$0\.78/);
+  assert.match(view, /KXH100WS-26AUG28-2\.750/);
+});
+
+test('tables carry column headers and the layout survives every supported width', () => {
+  for (const width of [68, 80, 88, 100, 118]) {
+    const view = renderDashboard(createDemoState(demoSettledFrame()), { color: false, width });
+    assert.ok(view.split('\n').every((line) => line.length === width), `width ${width}`);
+    assert.match(view, /TIME\s+MODEL|TIME\s+SOURCE/);
+    assert.match(view, /MARKET\s+SIDE/);
+  }
+  // The model and market probabilities are drawn on one shared axis, so the gap between the two
+  // bars is the decision. A second axis would make the comparison meaningless.
+  const wide = renderDashboard(createDemoState(demoSettledFrame()), { color: false, width: 100 });
+  const [model, market] = wide.split('\n').filter((line) => /P\(≥/.test(line));
+  assert.equal(model.indexOf('█'), market.indexOf('█'));
+  assert.ok(market.split('█').length > model.split('█').length);
+});
+
+test('color never changes a rendered line width', () => {
+  const plain = renderDashboard(createDemoState(6), { color: false, width: 100 });
+  const painted = renderDashboard(createDemoState(6), { color: true, width: 100 });
+  assert.notEqual(plain, painted);
+  const stripped = painted.replace(/\u001b\[[0-9;]*m/g, '');
+  assert.equal(stripped, plain);
+});
+
+test('failed and failover gateway calls have visible operational status', () => {
   const state = buildDashboardState([
     request({ attempts: 2 }),
     request({ model: null, provider_status: 502, savings_usd: 0 })
   ]);
   const view = renderDashboard(state, { color: false });
-  assert.match(view, /FALLBACK/);
+  assert.match(view, /FAILOVER/);
   assert.match(view, /ERROR/);
 });
 

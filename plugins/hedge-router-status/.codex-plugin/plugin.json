@@ -1,0 +1,21 @@
+{
+  "name": "hedge-router-status",
+  "version": "0.1.0",
+  "description": "Show hedge router compute exposure and paper P&L inside coding tools.",
+  "author": {
+    "name": "hedge router"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "hedge router",
+    "shortDescription": "See compute exposure and paper P&L at a glance.",
+    "longDescription": "A read-only companion for hedge router that surfaces local gateway spend, token exposure, and paper P&L in Codex, Claude Code, and OpenCode.",
+    "developerName": "hedge router",
+    "category": "Productivity",
+    "capabilities": ["Read"],
+    "defaultPrompt": [
+      "Show my hedge router compute exposure.",
+      "Explain my hedge router paper hedge report."
+    ]
+  }
+}

@@ -1,0 +1,1 @@
+{"timestamp":"2026-08-30T12:01:00Z","protocol":"llm","gateway":"agentgateway","http":{"status":200},"gen_ai":{"provider":{"name":"openai"},"request":{"model":"gpt-5-mini"},"response":{"model":"gpt-5-mini"},"usage":{"input_tokens":900,"output_tokens":120}},"agw":{"ai":{"usage":{"cost":{"total":0.00047}}}},"duration":"512ms"}

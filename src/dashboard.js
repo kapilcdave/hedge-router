@@ -1,5 +1,6 @@
 import path from 'node:path';
-import { loadEvents, savingsReport } from './telemetry.js';
+import { DEMO_RECORDING } from './demo-data.js';
+import { loadEvents, usageReport } from './telemetry.js';
 import { DATA_DIR, readJson } from './utils.js';
 
 const ANSI = {
@@ -8,8 +9,12 @@ const ANSI = {
   red: '\u001b[31m', magenta: '\u001b[35m', white: '\u001b[97m'
 };
 
+// Tone is a space-separated list so a cell can be both bold and colored. Chrome (box, rules,
+// labels, meter tracks) is dim and data is bright: the hierarchy is carried by weight, not hue.
 function paint(enabled, tone, value) {
-  return enabled && ANSI[tone] ? `${ANSI[tone]}${value}${ANSI.reset}` : value;
+  if (!enabled || !tone) return value;
+  const codes = String(tone).split(' ').map((name) => ANSI[name]).filter(Boolean);
+  return codes.length ? `${codes.join('')}${value}${ANSI.reset}` : value;
 }
 
 function truncate(value, width) {
@@ -25,8 +30,20 @@ function money(value, signed = false) {
   return `${prefix}$${absolute.toFixed(digits)}`;
 }
 
+// A gateway that never reports cost or latency is not a gateway reporting zero.
+function reported(value, format, width) {
+  return (Number(value) > 0 ? format(value) : 'n/a').padStart(width);
+}
+
 function percent(value, digits = 0) {
   return `${Number(value || 0).toFixed(digits)}%`;
+}
+
+function compactNumber(value) {
+  const number = Number(value || 0);
+  if (number >= 1_000_000) return `${(number / 1_000_000).toFixed(1)}M`;
+  if (number >= 1_000) return `${(number / 1_000).toFixed(1)}K`;
+  return String(Math.round(number));
 }
 
 function clock(timestamp) {
@@ -34,9 +51,12 @@ function clock(timestamp) {
   return Number.isFinite(parsed.getTime()) ? parsed.toISOString().slice(11, 19) : '--:--:--';
 }
 
-function bar(value, maximum, width) {
-  const filled = maximum > 0 ? Math.max(1, Math.round((value / maximum) * width)) : 0;
-  return `${'█'.repeat(filled)}${'░'.repeat(Math.max(0, width - filled))}`;
+// A meter is two segments so the track can stay recessive. Zero renders as an empty track rather
+// than a one-cell sliver, because a sliver reads as a small value instead of none.
+function meter(value, maximum, width, tone = 'cyan') {
+  const share = maximum > 0 ? Number(value) / Number(maximum) : 0;
+  const filled = share > 0 ? Math.min(width, Math.max(1, Math.round(share * width))) : 0;
+  return [['█'.repeat(filled), tone], ['░'.repeat(Math.max(0, width - filled)), 'dim']];
 }
 
 async function optionalJson(file) {
@@ -49,7 +69,7 @@ async function optionalJson(file) {
 
 export function buildDashboardState(events, market = null, options = {}) {
   const requests = events.filter((event) => event.event_type === 'request');
-  const report = savingsReport(events);
+  const report = usageReport(events);
   const mix = new Map();
   for (const request of requests) {
     const model = request.model || 'failed request';
@@ -94,138 +114,270 @@ export async function loadDashboardState({ eventsFile, marketFile, paperFile, fr
   return buildDashboardState(events, market, { frame, mode: 'live', source: resolvedMarket, paper });
 }
 
-function demoRequest(index) {
-  const routes = [
-    ['implementation', 'openai/gpt-5-mini', 0.0014, 0.0068, 842, 1],
-    ['refactor', 'anthropic/claude-sonnet-5', 0.0031, 0.0072, 1260, 1],
-    ['debug', 'openai/gpt-5', 0.0069, 0.0074, 1840, 2],
-    ['test', 'openai/gpt-5-nano', 0.0004, 0.0048, 390, 1],
-    ['analysis', 'openai/gpt-5-mini', 0.0012, 0.0061, 770, 1]
-  ];
-  const [task, model, actual, baseline, latency, attempts] = routes[index % routes.length];
-  return {
-    event_type: 'request', timestamp: new Date(Date.UTC(2026, 7, 28, 19, 32, index * 2)).toISOString(),
-    session_id: `demo-${Math.floor(index / 5)}`, model, task_class: task,
-    actual_cost_usd: actual * (1 + (index % 3) * 0.08), baseline_cost_usd: baseline,
-    savings_usd: baseline - actual * (1 + (index % 3) * 0.08),
-    latency_ms: latency + (index % 4) * 37, routing_overhead_ms: 4 + (index % 5),
-    provider_status: 200, attempts, input_tokens: 1800 + index * 113, output_tokens: 320 + index * 19
-  };
+// The frame at which the recording has revealed everything it holds. A single-frame render (a pipe,
+// a redirect, `--once`) shows this instead of frame 0, where the panels that carry the result are
+// still empty and the dashboard reads as broken.
+export function demoSettledFrame() {
+  return Math.max(DEMO_RECORDING.market.results.length * 3, DEMO_RECORDING.requests.length - 3);
 }
 
-function demoMarket(frame) {
-  const templates = [
-    ['KXH100WS-3.000', 'yes', 0.31, 0.22, 0.09],
-    ['KXH100WS-3.250', 'no', 0.38, 0.49, 0.08],
-    ['KXH100WS-3.500', 'yes', 0.27, 0.17, -0.20],
-    ['KXH100WS-3.750', 'yes', 0.19, 0.11, 0.86]
-  ];
-  const visible = Math.min(templates.length, 1 + Math.floor(frame / 3));
-  const results = templates.slice(0, visible).map(([id, side, probability, marketProbability, pnl], index) => ({
-    id, date: `2026-08-${24 + index}`, chip: 'H100', threshold: 3 + index * 0.25,
-    predicted_price: 3.18 + index * 0.16, outcome_price: 3.22 + index * 0.18,
-    probability, market_probability: marketProbability, naive_probability: marketProbability - 0.02,
-    outcome: pnl > 0 ? side === 'yes' ? 1 : 0 : side === 'yes' ? 0 : 1,
-    side, paper_pnl: pnl, training_rows: 42 + index * 3
-  }));
-  const paperPnl = results.reduce((sum, row) => sum + row.paper_pnl, 0);
-  return {
-    observations: 38 + frame, signal_brier: 0.171, market_brier: 0.191, naive_brier: 0.204,
-    relative_brier_improvement: 0.105, paper_pnl: paperPnl, trades: results.length,
-    gate: frame >= 9 && paperPnl > 0, results
-  };
-}
-
+// The demo replays DEMO_RECORDING, so its gate, Brier scores, and P&L are whatever the real
+// backtest produced. Nothing here can manufacture a pass the research did not earn.
 export function createDemoState(frame = 0) {
-  const count = Math.min(30, 7 + Math.max(0, frame));
-  const events = Array.from({ length: count }, (_, index) => demoRequest(index));
-  return buildDashboardState(events, demoMarket(frame), { mode: 'demo', frame });
+  const position = Math.max(0, Number(frame) || 0);
+  const recording = DEMO_RECORDING;
+  const events = recording.requests.slice(0, Math.min(recording.requests.length, 3 + position));
+  const revealed = recording.market.results.slice(0, Math.min(recording.market.results.length, Math.floor(position / 3)));
+  const market = {
+    ...recording.market,
+    results: revealed,
+    trades: revealed.length,
+    paper_pnl: Math.round(revealed.reduce((sum, row) => sum + row.paper_pnl, 0) * 100) / 100
+  };
+  return buildDashboardState(events, market, { mode: 'demo', frame: position, source: recording.series });
+}
+
+// Column specs are declared once and shared by the header row and the data rows, so a width change
+// can never leave the two out of alignment.
+function columnist(specs) {
+  return (values, tones = []) => specs.map((spec, index) => {
+    const clipped = truncate(values[index], spec.width);
+    const cell = spec.align === 'right' ? clipped.padStart(spec.width) : clipped.padEnd(spec.width);
+    return [`${cell}${' '.repeat(spec.gap ?? 2)}`, tones[index] ?? spec.tone ?? null];
+  });
 }
 
 export function renderDashboard(state, options = {}) {
   const width = Math.max(68, Math.min(118, Number(options.width || 100)));
   const inner = width - 2;
+  const room = inner - 2;
+  const wide = room >= 84;
   const color = options.color !== false;
   const lines = [];
   const horizontal = '─'.repeat(inner);
-  const add = (content = '', tone = null) => {
-    const fitted = truncate(content, inner - 2).padEnd(inner - 2);
-    lines.push(`│ ${tone ? paint(color, tone, fitted) : fitted} │`);
+
+  // Body lines take either a string or a list of [text, tone] cells. Padding is measured on the
+  // plain text, so color can never change a line's rendered width.
+  const add = (body = '', tone = null) => {
+    const cells = (Array.isArray(body) ? body : [[body, tone]])
+      .map((cell) => (Array.isArray(cell) ? cell : [cell, tone]));
+    const painted = [];
+    let used = 0;
+    for (const [text, cellTone] of cells) {
+      if (used >= room) break;
+      const fitted = truncate(text, room - used);
+      used += fitted.length;
+      painted.push(paint(color, cellTone, fitted));
+    }
+    lines.push(`│ ${painted.join('')}${' '.repeat(Math.max(0, room - used))} │`);
   };
-  const rule = (label, tone = 'cyan') => {
-    const text = ` ${label} `;
-    const remainder = Math.max(0, inner - text.length);
-    lines.push(`├${paint(color, tone, text)}${'─'.repeat(remainder)}┤`);
+  const rule = (label, meta = '') => {
+    const name = truncate(label, Math.max(1, inner - 6));
+    const tail = meta && name.length + meta.length + 7 <= inner ? ` ${meta} ─` : '';
+    const fill = Math.max(0, inner - name.length - 3 - tail.length);
+    lines.push([
+      '├', paint(color, 'dim', '─ '), paint(color, 'cyan', name),
+      paint(color, 'dim', ` ${'─'.repeat(fill)}`), paint(color, 'dim', tail), '┤'
+    ].join(''));
   };
+  const kpi = (label, value, tone = 'white bold') => [[label, 'dim'], [value, tone]];
+  const dot = [['  ·  ', 'dim']];
 
   const report = state.report;
+  const demo = state.mode === 'demo';
   const paperPnl = Number(state.paper?.realized_pnl ?? state.market?.paper_pnl ?? 0);
   const pulse = state.frame % 2 ? '◉' : '●';
+  const tagline = demo ? 'recorded replay' : 'live';
+  const title = `${pulse} hedge router`;
+
   lines.push(`╭${horizontal}╮`);
-  add(`${pulse} HEDGE ROUTER  //  ${state.mode === 'demo' ? 'DEMO FEED' : 'LIVE'}  //  PAPER EXECUTION`, 'bold');
-  add(`REQUESTS ${String(report.requests).padStart(4)}   SAVED ${money(report.savings_usd).padStart(9)}   SAVE RATE ${percent(report.savings_percent).padStart(4)}   PAPER P&L ${money(paperPnl, true).padStart(9)}`, paperPnl >= 0 ? 'green' : 'red');
+  add([
+    [title, 'bold'],
+    [' '.repeat(Math.max(1, room - title.length - tagline.length)), null],
+    [tagline, 'dim']
+  ]);
 
-  const leadModel = state.recent[0]?.model || 'waiting for first request';
+  // One KPI row, labels recessive and values bright. Splits in two on a narrow terminal rather
+  // than truncating, because paper P&L is the headline and must never be the cell that falls off.
+  const cachedShare = report.input_tokens > 0 ? (report.cached_input_tokens / report.input_tokens) * 100 : 0;
+  const volume = [
+    ...kpi('CALLS ', String(report.requests)), ...dot,
+    ...kpi('TOKENS ', compactNumber(report.input_tokens + report.output_tokens)), ...dot,
+    ...kpi('CACHED ', percent(cachedShare))
+  ];
+  const value = [
+    ...kpi('COMPUTE SPEND ', reported(report.actual_cost_usd, money, 0)), ...dot,
+    ...kpi('PAPER P&L ', money(paperPnl, true), paperPnl > 0 ? 'green bold' : paperPnl < 0 ? 'red bold' : 'white bold')
+  ];
+  if (wide) add([...volume, ...dot, ...value]);
+  else { add(volume); add(value); }
+  add([
+    ['MEDIAN LATENCY ', 'dim'], [reported(report.median_latency_ms, (ms) => `${Math.round(ms)}ms`, 0), 'dim'],
+    ['   ERRORS ', 'dim'], [percent(report.error_rate * 100, 1), report.error_rate > 0 ? 'red' : 'dim'],
+    ['   FAILOVER ', 'dim'], [percent(report.fallback_rate * 100, 1), report.fallback_rate > 0 ? 'yellow' : 'dim'],
+    ['   SESSIONS ', 'dim'], [String(report.sessions), 'dim']
+  ]);
+
+  const lead = state.recent[0];
   const travel = state.frame % 9;
-  add(`REQUEST ${'·'.repeat(travel)}◆${'·'.repeat(8 - travel)}▶ [ AUTO ROUTER ] ─────▶ ${truncate(leadModel, 27)}`, 'cyan');
+  const leadSource = lead?.source || lead?.gateway || 'gateway';
+  add([
+    ['TELEMETRY  ', 'dim'],
+    [`${'·'.repeat(travel)}◆${'·'.repeat(8 - travel)}▶ `, 'cyan'],
+    [truncate(leadSource.toUpperCase(), 16), 'dim'],
+    [' ───▶ ', 'dim'],
+    [truncate(lead?.model || 'waiting for first request', 30), 'cyan']
+  ]);
 
-  rule('LIVE ROUTING');
+  const gatewayColumns = wide
+    ? [
+      { width: 8 }, { width: 13 }, { width: 24 }, { width: 9, align: 'right' },
+      { width: 8, align: 'right' }, { width: 8, align: 'right' }, { width: 8, gap: 0 }
+    ]
+    : [{ width: 8 }, { width: 24 }, { width: 8, align: 'right' }, { width: 8, gap: 0 }];
+  const gatewayRow = columnist(gatewayColumns);
+  const gatewayHeader = wide
+    ? ['TIME', 'SOURCE', 'MODEL', 'TOKENS', 'COST', 'LATENCY', 'STATUS']
+    : ['TIME', 'MODEL', 'TOKENS', 'STATUS'];
+
+  rule(demo ? 'RECORDED GATEWAY DATA' : 'LIVE GATEWAY DATA', `${report.requests} requests`);
   if (!state.recent.length) {
-    add('Waiting for requests. Point your client at http://127.0.0.1:8787/v1', 'dim');
+    add('Waiting for metadata. Run hedge-router ingest against a gateway export.', 'dim');
   } else {
+    add(gatewayRow(gatewayHeader).map(([text]) => [text, 'dim']));
     for (const request of state.recent.slice(0, 5)) {
-      const savingRate = request.baseline_cost_usd > 0 ? (request.savings_usd / request.baseline_cost_usd) * 100 : 0;
-      const status = request.provider_status >= 400 ? 'ERROR' : request.attempts > 1 ? 'FALLBACK' : 'ROUTED';
-      const row = `${clock(request.timestamp)}  ${truncate(String(request.task_class || 'other').toUpperCase(), 12).padEnd(12)}  ${truncate(request.model || 'no route', 26).padEnd(26)}  ${money(request.savings_usd).padStart(8)}  ${percent(savingRate).padStart(4)}  ${String(Math.round(request.latency_ms || 0)).padStart(5)}ms  ${status}`;
-      add(row, status === 'ERROR' ? 'red' : status === 'FALLBACK' ? 'yellow' : 'green');
+      const status = request.provider_status >= 400 ? 'ERROR' : request.attempts > 1 ? 'FAILOVER' : 'OBSERVED';
+      // Only the exceptions spend a color. A screen where every row is green cannot show a failure.
+      const tone = status === 'ERROR' ? 'red' : status === 'FAILOVER' ? 'yellow' : 'dim';
+      const tokens = compactNumber(Number(request.input_tokens || 0) + Number(request.output_tokens || 0));
+      const cost = reported(request.actual_cost_usd, money, 0);
+      const latency = reported(request.latency_ms, (ms) => `${Math.round(ms)}ms`, 0);
+      const model = truncate(request.model || 'unknown', 24);
+      const cells = wide
+        ? [clock(request.timestamp), request.source || request.gateway || 'unknown', model, tokens, cost, latency, status]
+        : [clock(request.timestamp), model, tokens, status];
+      const tones = wide
+        ? ['dim', 'dim', 'white', 'cyan', null, null, tone]
+        : ['dim', 'white', 'cyan', tone];
+      add(gatewayRow(cells, tones));
     }
   }
 
-  rule('MODEL FLOW');
-  if (!state.modelMix.length) add('No completed routes yet.', 'dim');
+  rule('MODEL EXPOSURE');
+  if (!state.modelMix.length) add('No model calls ingested yet.', 'dim');
   const maximum = Math.max(0, ...state.modelMix.map((row) => row.count));
+  const meterWidth = wide ? 24 : 14;
   for (const row of state.modelMix.slice(0, 4)) {
-    add(`${truncate(row.model, 28).padEnd(28)} ${bar(row.count, maximum, 18)} ${percent(row.share * 100).padStart(4)}  ${String(row.count).padStart(4)} req`, 'magenta');
+    // One accent for every model: hue is reserved for status, and the label already carries identity.
+    add([
+      [truncate(row.model, 30).padEnd(30), 'white'],
+      ...meter(row.count, maximum, meterWidth),
+      [`  ${percent(row.share * 100).padStart(4)}`, 'cyan'],
+      [`  ${String(row.count).padStart(4)} req`, 'dim']
+    ]);
   }
 
-  rule('COMPUTE SIGNAL');
+  rule('COMPUTE SIGNAL', demo ? `${state.source} · lead ${DEMO_RECORDING.lead_days}d` : '');
   if (!state.latestSignal) {
     add(state.paper
-      ? 'No trained signal yet. Collect aligned router aggregates before opening paper orders.'
+      ? 'No trained signal yet. Collect aligned gateway aggregates before opening paper orders.'
       : `Waiting for ${state.source || '.hedge-router/evaluation.json'}`, 'dim');
   } else {
     const signal = state.latestSignal;
-    const gate = state.market?.gate ? 'GATE OPEN' : 'RESEARCHING';
-    if (signal.order_id) {
-      const fair = signal.side === 'yes' ? signal.probability : 1 - signal.probability;
-      add(`${signal.chip || 'GPU'} PREDICTED ${money(signal.predicted_price)}   THRESHOLD ${money(signal.threshold)}   BUY ${String(signal.side).toUpperCase()}   FAIR ${percent(fair * 100, 1)}   ASK ${percent(signal.entry_price * 100, 1)}   NET EDGE +${percent(Number(signal.net_edge || 0) * 100, 1)}   ${gate}`, state.market?.gate ? 'green' : 'yellow');
-    } else {
-      const edge = (Number(signal.probability) - Number(signal.market_probability)) * 100;
-      add(`${signal.chip || 'GPU'} PREDICTED ${money(signal.predicted_price)}   THRESHOLD ${money(signal.threshold)}   FAIR ${percent(signal.probability * 100, 1)}   MARKET ${percent(signal.market_probability * 100, 1)}   EDGE ${edge >= 0 ? '+' : ''}${percent(edge, 1)}   ${gate}`, state.market?.gate ? 'green' : 'yellow');
-    }
+    const open = Boolean(state.market?.gate);
+    // Edge is signed from the side actually taken, net of costs where the evaluator recorded them.
+    // The raw yes-minus-market difference reads as a loss on every profitable NO.
+    const edge = Number.isFinite(Number(signal.net_edge ?? signal.edge))
+      ? Number(signal.net_edge ?? signal.edge)
+      : signal.side === 'no'
+        ? Number(signal.market_probability) - Number(signal.probability)
+        : Number(signal.probability) - Number(signal.market_probability);
+    const taken = signal.side && signal.side !== 'hold' ? `BUY ${String(signal.side).toUpperCase()}` : 'NO TRADE';
+    add([
+      [`${signal.chip || 'GPU'} FORECAST `, 'dim'], [money(signal.predicted_price), 'white bold'],
+      ['   THRESHOLD ', 'dim'], [money(signal.threshold), 'white'],
+      ['   ', null], [taken, 'yellow'],
+      [signal.entry_price == null ? '' : ` @ ${Math.round(signal.entry_price * 100)}¢`, 'yellow']
+    ]);
+    // Two aligned bars on one axis: the whole decision is the gap between them.
+    const label = `P(≥ ${money(signal.threshold)})`;
+    add([
+      [`  MODEL   ${label.padEnd(14)}`, 'dim'], ...meter(signal.probability, 1, meterWidth),
+      [`  ${percent(Number(signal.probability) * 100, 1).padStart(6)}`, 'cyan']
+    ]);
+    add([
+      [`  MARKET  ${label.padEnd(14)}`, 'dim'], ...meter(signal.market_probability, 1, meterWidth, 'white'),
+      [`  ${percent(Number(signal.market_probability) * 100, 1).padStart(6)}`, 'white']
+    ]);
+    add([
+      ['  NET EDGE ', 'dim'], [`${edge >= 0 ? '+' : ''}${percent(edge * 100, 1)}`, edge >= 0 ? 'green' : 'red'],
+      ['  after fees and slippage  ·  ', 'dim'], [open ? 'GATE OPEN' : 'RESEARCHING', open ? 'green bold' : 'yellow']
+    ]);
   }
 
-  rule('KALSHI PAPER HEDGES', 'yellow');
+  // A backtest row has no position size, so the column only exists when something fills it. A
+  // column of em-dashes spends width to say nothing.
+  const sized = state.hedges.some((hedge) => hedge.contracts);
+  const hedgeColumns = [
+    { width: 5 }, { width: wide ? 30 : 24, gap: wide ? 2 : 1 }, { width: 7, gap: 1 },
+    ...(sized ? [{ width: 4, gap: 1 }] : []),
+    { width: 5, align: 'right', gap: wide ? 2 : 1 },
+    ...(wide ? [{ width: 6, align: 'right' }, { width: 8, align: 'right' }] : []),
+    { width: 9, align: 'right', gap: 0 }
+  ];
+  const hedgeRow = columnist(hedgeColumns);
+  const hedgeHeader = [
+    '', 'MARKET', 'SIDE', ...(sized ? ['SIZE'] : []), 'ENTRY',
+    ...(wide ? ['FAIR', 'NET EDGE'] : []), 'P&L'
+  ];
+
+  rule('KALSHI PAPER HEDGES', state.market ? `${state.market.trades ?? state.hedges.length} settled` : '');
   if (!state.hedges.length) {
     add('PAPER  No qualifying edge after fees and slippage.', 'dim');
   } else {
+    add(hedgeRow(hedgeHeader).map(([text]) => [text, 'dim']));
     for (const hedge of state.hedges.slice(0, 4)) {
-      if (hedge.order_id) {
-        const status = String(hedge.status || 'open').toUpperCase();
-        const row = `PAPER  ${truncate(hedge.id, 25).padEnd(25)}  BUY ${String(hedge.side).toUpperCase().padEnd(3)} x${String(hedge.contracts).padEnd(3)} @ ${String(Math.round(hedge.entry_price * 100)).padStart(2)}¢   ${status.padEnd(7)}   EDGE +${percent(Number(hedge.edge || 0) * 100, 1).padStart(5)}   P&L ${status === 'OPEN' ? '—' : money(hedge.paper_pnl, true)}`;
-        add(row, status === 'OPEN' ? 'yellow' : hedge.paper_pnl >= 0 ? 'green' : 'red');
-        continue;
-      }
-      const edge = hedge.side === 'yes'
+      const status = hedge.order_id ? String(hedge.status || 'open').toUpperCase() : 'SETTLED';
+      const settled = status !== 'OPEN';
+      // Show what the trade actually cost: the recorded ask and the edge after fees and slippage.
+      // A midpoint-derived price flatters every entry by half the spread.
+      const rawEdge = hedge.side === 'yes'
         ? hedge.probability - hedge.market_probability
         : hedge.market_probability - hedge.probability;
-      const row = `PAPER  ${truncate(hedge.id, 25).padEnd(25)}  BUY ${String(hedge.side).toUpperCase().padEnd(3)} @ ${String(Math.round((hedge.side === 'yes' ? hedge.market_probability : 1 - hedge.market_probability) * 100)).padStart(2)}¢   FAIR ${percent((hedge.side === 'yes' ? hedge.probability : 1 - hedge.probability) * 100, 1).padStart(5)}   EDGE +${percent(edge * 100, 1).padStart(5)}   P&L ${money(hedge.paper_pnl, true)}`;
-      add(row, hedge.paper_pnl >= 0 ? 'green' : 'red');
+      const entry = Number.isFinite(Number(hedge.entry_price))
+        ? Number(hedge.entry_price)
+        : hedge.side === 'yes' ? hedge.market_probability : 1 - hedge.market_probability;
+      const edge = Number.isFinite(Number(hedge.net_edge ?? hedge.edge)) ? Number(hedge.net_edge ?? hedge.edge) : rawEdge;
+      const fair = (hedge.side === 'yes' ? hedge.probability : 1 - hedge.probability) * 100;
+      const pnl = settled ? money(hedge.paper_pnl, true) : status;
+      const tone = !settled ? 'yellow' : hedge.paper_pnl >= 0 ? 'green' : 'red';
+      const cells = [
+        'PAPER', hedge.id, `BUY ${String(hedge.side).toUpperCase()}`,
+        ...(sized ? [hedge.contracts ? `x${hedge.contracts}` : '—'] : []),
+        `${Math.round(entry * 100)}¢`,
+        ...(wide ? [percent(fair, 1), `${edge >= 0 ? '+' : ''}${percent(edge * 100, 1)}`] : []),
+        pnl
+      ];
+      const tones = [
+        'dim', 'white', 'white', ...(sized ? ['dim'] : []), 'white',
+        ...(wide ? ['cyan', edge >= 0 ? 'cyan' : 'red'] : []), tone
+      ];
+      add(hedgeRow(cells, tones));
     }
   }
 
-  rule('STATUS', 'dim');
-  add(`privacy-safe metadata only  •  prompts and code never displayed  •  ${state.mode === 'demo' ? 'simulated data' : 'refreshing live'}  •  press q to quit`, 'dim');
+  rule('STATUS');
+  if (demo) {
+    // The demo's job is to show the pipeline, not to imply a result. Lead with the shortfall.
+    const [from, to] = DEMO_RECORDING.settlement_window;
+    const events = DEMO_RECORDING.market.independent_events;
+    add([
+      ['RECORDED REPLAY  ', 'yellow'], ...meter(events, 30, 12, 'yellow'),
+      [`  ${events}/30 events`, 'yellow'],
+      [`  ·  ${from}→${to}  ·  no measured edge yet`, 'dim']
+    ]);
+  }
+  add(`metadata only · no prompts or code · ${demo ? 'no live orders, ever' : 'refreshing live'} · q to quit`, 'dim');
   lines.push(`╰${horizontal}╯`);
   return lines.join('\n');
 }
@@ -260,7 +412,7 @@ export async function runDashboard(options = {}) {
   try {
     while (!stopped && frame < frames) {
       const state = options.demo
-        ? createDemoState(frame)
+        ? createDemoState(once ? demoSettledFrame() : frame)
         : await loadDashboardState({ eventsFile: options.eventsFile, marketFile: options.marketFile, paperFile: options.paperFile, frame });
       const view = renderDashboard(state, {
         width: options.width || output.columns || 100,
