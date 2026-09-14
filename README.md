@@ -228,6 +228,18 @@ annualized volatility and no autocorrelation, so almost none of its variance is
 price. A consumer with a fixed model mix has no exposure to it. All 87 markets are
 settled with 4,779 contracts of lifetime volume.
 
+Seven further series shorten the chain completely: they settle on the *provider's
+own published price page*, so for a customer paying list price the settlement
+variable is not correlated with their cost, it is their cost.
+[`docs/list-price-token-markets.md`](docs/list-price-token-markets.md) measures
+them. The hedge is against being locked into a contract the provider later
+undercuts, and because the strikes are `less_or_equal` the correct side is YES —
+Kalshi's own `no_sub_title` field says otherwise on all 24 markets. The pipeline
+now prices and sizes them, but **none has settled**: they are annual contracts
+closing 2027-04-01, so there is no Brier score, no paper P&L, and the market gate
+cannot open on them. The basis problem is solved; the forecasting problem is
+untouched.
+
 ### Retrospective backtest
 
 Forward paper trading accumulates one settlement event per week. `backtest`
