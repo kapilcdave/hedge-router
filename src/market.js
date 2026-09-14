@@ -18,13 +18,36 @@ export function parseSettlementValue(value) {
   return Number.isFinite(number) ? number : null;
 }
 
+export const STRIKE_DIRECTIONS = ['greater', 'less_or_equal'];
+
+// Kalshi carries the comparison in strike_type. `greater` pays YES above the strike; the token
+// list-price ladders are `less_or_equal` and pay YES at or below it. Getting this backwards
+// inverts every outcome, so the direction travels with the market rather than being assumed.
+export function yesFromValue(value, threshold, direction = 'greater') {
+  if (!STRIKE_DIRECTIONS.includes(direction)) throw new Error(`unsupported strike direction: ${direction}`);
+  if (direction === 'less_or_equal') return value <= Number(threshold) ? 1 : 0;
+  return value > Number(threshold) ? 1 : 0;
+}
+
+// Kalshi stores a `greater` strike in floor_strike and a `less_or_equal` strike in cap_strike.
+// Reading the wrong field yields undefined, which silently becomes NaN downstream, so the field
+// and the comparison direction are resolved together in one place.
+export function strikeFor(market) {
+  const strikeDirection = market?.strike_type ?? 'greater';
+  if (!STRIKE_DIRECTIONS.includes(strikeDirection)) throw new Error(`unsupported strike type ${market?.strike_type}`);
+  const field = strikeDirection === 'less_or_equal' ? 'cap_strike' : 'floor_strike';
+  const threshold = Number(market?.[field]);
+  if (!Number.isFinite(threshold)) throw new Error(`missing ${field}`);
+  return { strikeDirection, threshold };
+}
+
 export function settlementOutcome(market, threshold) {
   const result = String(market?.result ?? '').trim().toLowerCase();
   if (result === 'yes') return 1;
   if (result === 'no') return 0;
   const price = parseSettlementValue(market?.outcomePrice);
   if (price == null) return null;
-  return price > Number(threshold) ? 1 : 0;
+  return yesFromValue(price, threshold, market?.strikeDirection || 'greater');
 }
 
 export function validateMarketDataset({ index, markets, aggregates, requireOutcome = true }) {
@@ -49,6 +72,9 @@ export function validateMarketDataset({ index, markets, aggregates, requireOutco
     }
     if (requireOutcome && settlementOutcome(market, market.threshold) == null) {
       throw new Error(`${market.id} has no usable settlement (need result yes/no or numeric outcomePrice)`);
+    }
+    if (market.strikeDirection != null && !STRIKE_DIRECTIONS.includes(market.strikeDirection)) {
+      throw new Error(`${market.id} has invalid strikeDirection ${market.strikeDirection}`);
     }
     if (market.feePerContract != null && !Number.isFinite(Number(market.feePerContract))) throw new Error(`${market.id} has invalid feePerContract`);
     if (market.feeRate != null && !Number.isFinite(Number(market.feeRate))) throw new Error(`${market.id} has invalid feeRate`);
@@ -213,8 +239,14 @@ export function forecastMarkets({ index, markets, aggregates, minimumTraining = 
       predictedPrice = prior.price + dot(coefficients, featuresFor(aggregate));
     }
     const residualStd = Math.sqrt(mean(historicalTargets.map((target) => (target - mean(historicalTargets)) ** 2))) || 0.1;
-    const probability = probabilityAbove(predictedPrice, market.threshold, residualStd);
-    const naiveProbability = probabilityAbove(prior.price, market.threshold, residualStd);
+    // YES means "above the strike" on a `greater` market and "at or below" it on a
+    // `less_or_equal` one, so the forecast has to be complemented for the latter. Both the
+    // signal and the naive baseline are quoted as P(YES) so the Brier comparison stays honest.
+    const yesProbability = (center) => market.strikeDirection === 'less_or_equal'
+      ? clamp(1 - probabilityAbove(center, market.threshold, residualStd), 0.01, 0.99)
+      : probabilityAbove(center, market.threshold, residualStd);
+    const probability = yesProbability(predictedPrice);
+    const naiveProbability = yesProbability(prior.price);
     const marketProbability = clamp(Number(market.yesPrice), 0.01, 0.99);
     const yesEntry = Number(market.yesAsk ?? marketProbability);
     const noEntry = Number(market.noAsk ?? 1 - marketProbability);
@@ -238,6 +270,7 @@ export function forecastMarkets({ index, markets, aggregates, minimumTraining = 
     results.push({
       id: market.id, event_ticker: market.eventTicker || market.event_ticker || null,
       date: market.date, chip: market.chip, threshold: market.threshold,
+      strike_direction: market.strikeDirection || 'greater',
       observed_at: market.observedAt, close_time: market.closeTime,
       predicted_price: predictedPrice,
       probability, market_probability: marketProbability, naive_probability: naiveProbability,

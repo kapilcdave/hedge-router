@@ -1,13 +1,7 @@
-import { parseSettlementValue, settlementOutcome } from './market.js';
+import { parseSettlementValue, settlementOutcome, strikeFor } from './market.js';
 import { clamp } from './utils.js';
 
 const DEFAULT_BASE_URL = 'https://external-api.kalshi.com/trade-api/v2';
-
-function finite(value, name) {
-  const number = Number(value);
-  if (!Number.isFinite(number)) throw new Error(`Kalshi market is missing numeric ${name}`);
-  return number;
-}
 
 async function getJson(url, fetchImpl = fetch) {
   const response = await fetchImpl(url, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(15_000) });
@@ -64,7 +58,7 @@ function executableQuotes(market) {
 
 export function snapshotKalshiMarket(market, options) {
   if (market.market_type && market.market_type !== 'binary') throw new Error(`${market.ticker} is not binary`);
-  if (market.strike_type !== 'greater') throw new Error(`${market.ticker} uses unsupported strike type ${market.strike_type}`);
+  const { strikeDirection, threshold } = strikeFor(market);
   const observedAt = options.observedAt || new Date().toISOString();
   const closeTime = market.close_time || market.expiration_time;
   if (!Number.isFinite(Date.parse(closeTime))) throw new Error(`${market.ticker} has no valid close time`);
@@ -74,7 +68,8 @@ export function snapshotKalshiMarket(market, options) {
     eventTicker: market.event_ticker,
     date: closeTime.slice(0, 10),
     chip: options.chip,
-    threshold: finite(market.floor_strike, 'floor_strike'),
+    threshold,
+    strikeDirection,
     yesPrice: yesMidpoint(market),
     ...executableQuotes(market),
     feePerContract: options.feePerContract == null ? null : Number(options.feePerContract),
@@ -124,7 +119,10 @@ export async function resolveKalshiSnapshots(snapshotDocument, options = {}) {
       continue;
     }
     const outcomePrice = parseSettlementValue(market.expiration_value);
-    const settled = { ...market, outcomePrice, result: market.result };
+    // The direction comes from the snapshot, not from the freshly fetched market: the snapshot is
+    // the contract we actually forecast and priced, and it is what the paper book settles against.
+    const strikeDirection = snapshot.strikeDirection || 'greater';
+    const settled = { ...market, outcomePrice, result: market.result, strikeDirection };
     if (settlementOutcome(settled, snapshot.threshold) == null) {
       pending.push(snapshot.id);
       continue;
@@ -135,6 +133,7 @@ export async function resolveKalshiSnapshots(snapshotDocument, options = {}) {
       date: snapshot.date,
       chip: snapshot.chip,
       threshold: snapshot.threshold,
+      strikeDirection,
       yesPrice: snapshot.yesPrice,
       yesBid: snapshot.yesBid,
       yesAsk: snapshot.yesAsk,

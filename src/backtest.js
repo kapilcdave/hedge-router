@@ -1,5 +1,5 @@
 import { fetchKalshiMarkets, KALSHI_API_BASE_URL } from './kalshi.js';
-import { evaluateMarkets, kalshiFee, parseSettlementValue, settlementOutcome } from './market.js';
+import { evaluateMarkets, kalshiFee, parseSettlementValue, settlementOutcome, strikeFor } from './market.js';
 import { clamp } from './utils.js';
 
 const DAY_SECONDS = 86_400;
@@ -45,13 +45,11 @@ function closeDollars(leg) {
 
 export function historicalSnapshot({ market, candles, chip, leadDays, feeRate = 0.07, feePerContract = null, slippage = 0 }) {
   if (market.market_type && market.market_type !== 'binary') throw new Error('not a binary market');
-  if (market.strike_type !== 'greater') throw new Error(`unsupported strike type ${market.strike_type}`);
-  const threshold = Number(market.floor_strike);
-  if (!Number.isFinite(threshold)) throw new Error('missing floor_strike');
+  const { strikeDirection, threshold } = strikeFor(market);
   const closeTime = market.close_time || market.expiration_time;
   const closeTs = Date.parse(closeTime) / 1000;
   if (!Number.isFinite(closeTs)) throw new Error('missing close time');
-  if (settlementOutcome({ result: market.result, outcomePrice: market.expiration_value }, threshold) == null) {
+  if (settlementOutcome({ result: market.result, outcomePrice: market.expiration_value, strikeDirection }, threshold) == null) {
     throw new Error('no usable settlement');
   }
 
@@ -73,6 +71,7 @@ export function historicalSnapshot({ market, candles, chip, leadDays, feeRate = 
     date: closeTime.slice(0, 10),
     chip,
     threshold,
+    strikeDirection,
     yesPrice: Math.round(clamp((yesBid + yesAsk) / 2, 0.01, 0.99) * 10_000) / 10_000,
     yesBid,
     yesAsk,

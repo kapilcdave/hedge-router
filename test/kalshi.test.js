@@ -28,6 +28,36 @@ test('snapshot captures a pre-settlement midpoint and provenance', () => {
   }), /no longer eligible/);
 });
 
+// Verbatim from the live KXGBT55OY-27-NA-25 record, trimmed to the fields the snapshot reads.
+// These list-price ladders are the only `less_or_equal` markets the pipeline sees, so the fixture
+// is copied rather than adapted from the GPU shape.
+function tokenMarket(overrides = {}) {
+  return {
+    ticker: 'KXGBT55OY-27-NA-25', event_ticker: 'KXGBT55OY-27',
+    market_type: 'binary', status: 'active', strike_type: 'less_or_equal', cap_strike: 25,
+    yes_bid_dollars: '0.2100', yes_ask_dollars: '0.2700', no_bid_dollars: '0.7300',
+    no_ask_dollars: '0.7900', last_price_dollars: '0.2700',
+    close_time: '2027-04-01T15:00:00Z', volume_fp: '5429.05',
+    rules_primary: 'If the Output Token Price of OpenAI GPT 5.5 on https://openai.com/api/pricing/ is at or below $25 in 2026, then the market resolves to Yes.',
+    ...overrides
+  };
+}
+
+test('a live list-price token market snapshots with its cap strike and direction', () => {
+  const snapshot = snapshotKalshiMarket(tokenMarket(), { chip: 'GPT-5.5-output', observedAt: '2026-09-14T18:00:00Z' });
+  assert.equal(snapshot.threshold, 25);
+  assert.equal(snapshot.strikeDirection, 'less_or_equal');
+  assert.equal(snapshot.yesAsk, 0.27);
+  assert.equal(snapshot.yesPrice, 0.24);
+  // The pipeline must not read floor_strike here: that field is absent, and Number(undefined) is
+  // NaN, which would have made every threshold silently unusable.
+  assert.equal('floor_strike' in tokenMarket(), false);
+  validateMarketDataset({ index: [], markets: [snapshot], aggregates: [], requireOutcome: false });
+  assert.throws(() => validateMarketDataset({
+    index: [], markets: [{ ...snapshot, strikeDirection: 'between' }], aggregates: [], requireOutcome: false
+  }), /invalid strikeDirection between/);
+});
+
 test('midpoint can derive a Yes ask from the No bid', () => {
   assert.equal(yesMidpoint(openMarket({ yes_ask_dollars: '', yes_bid_dollars: '0.40', no_bid_dollars: '0.50' })), 0.45);
 });

@@ -134,6 +134,7 @@ export function placePaperOrders({
       chip: signal.chip,
       date: signal.date,
       threshold: signal.threshold,
+      strike_direction: signal.strike_direction || 'greater',
       side: signal.side,
       contracts,
       entry_price: entryPrice,
@@ -175,7 +176,11 @@ export function settlePaperPortfolio({ portfolio, markets, now }) {
     if (order.status !== 'open') return order;
     const market = byId.get(order.market_id);
     const settlementTime = Date.parse(market?.settlementTime || timestamp);
-    const outcome = market ? settlementOutcome(market, order.threshold) : null;
+    // Settle against the direction recorded on the order. If the resolved market disagrees, the
+    // position was priced under a different contract and must not be settled on a guess.
+    const direction = order.strike_direction || market?.strikeDirection || 'greater';
+    const mismatched = market && (market.strikeDirection || 'greater') !== direction;
+    const outcome = market && !mismatched ? settlementOutcome({ ...market, strikeDirection: direction }, order.threshold) : null;
     if (!market || outcome == null ||
         Date.parse(timestamp) < Date.parse(order.close_time) ||
         !Number.isFinite(settlementTime) || settlementTime < Date.parse(order.placed_at)) {
