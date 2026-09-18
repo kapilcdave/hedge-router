@@ -240,6 +240,18 @@ closing 2027-04-01, so there is no Brier score, no paper P&L, and the market gat
 cannot open on them. The basis problem is solved; the forecasting problem is
 untouched.
 
+A third family is listed against *open-weights risk* rather than price:
+`KXOPENSOURCESHARE`, 72 markets and 110,020 contracts of lifetime volume, settling
+on the open-weights percentage in a third-party gateway's token-volume chart.
+[`docs/open-weights-risk.md`](docs/open-weights-risk.md) measures it with
+`scripts/opensource-share.mjs`, which recovers the settlement variable from settled
+strikes because the publisher exposes no API and no archive. The recovered share
+*rose* from ~61% to ~74% over three weeks, so the decline premise is not what the
+venue has settled. But the contract pays on one gateway's traffic mix, which is
+the same wrong variable as the token index: a self-hoster's exposure is whether
+weights stay downloadable, not what share they serve. The doc lists the
+availability instruments that are machine-readable instead.
+
 ### Retrospective backtest
 
 Forward paper trading accumulates one settlement event per week. `backtest`
