@@ -180,6 +180,56 @@ ladders listed off the print, including one 12-market event. That is a listing
 process that does not see the number it is bracketing until after it has listed —
 consistent with a settlement source whose current value is not archived.
 
+## The archive is now running
+
+`author-share-snapshot` writes one row per author per trailing window to
+`.hedge-router/author-share.ndjson`, and `author-share-report` derives shares from
+it at read time. First window captured 2026-09-21:
+
+| | |
+| --- | ---: |
+| window end / week start | 2026-09-20 / 2026-09-14 |
+| authors | 71 |
+| model rows on the window date | 539 of 572 |
+| generation requests | 5,526,669,903 |
+| requests excluded as non-generation | 369,456,475 (6.3%) |
+| authors never displayed in the token chart | 62 of 71 |
+| `weeks_until_backtestable` | 11 |
+
+Its top-15 shares reproduce the five 2026-09-21 prints to the same 0.086 as the
+one-off script, so the collector and `scripts/author-share.mjs` agree. Four design
+choices are load-bearing, and each one is a trap this family already contains:
+
+- **Counts are archived; shares are derived.** Five simultaneous prints fit every
+  denominator from all-authors to top-15 inside 0.9 points, so the cut is *not
+  identified*. Writing a share into the ledger would freeze a guess into the record
+  the ledger exists to be. The report publishes all three cuts side by side; where
+  they disagree by more than a strike increment, the print does not discriminate
+  either.
+- **The window is the dominant date, not the latest.** 539 of 572 rows carry one
+  date and 33 are stragglers on other days. `max(date)` would reduce each week to
+  whichever handful of models reported last.
+- **Namespaces are never merged into companies.** `meta` and `meta-llama` are kept
+  apart, because summing them would hide the factor-of-two ambiguity the contract
+  actually carries. Three live rows (`text-embedding-3-small`,
+  `text-embedding-3-large`, and one empty permaslug) have no namespace at all;
+  they are bucketed as unattributed rather than dropped or guessed — attributing
+  them would invent traffic for OpenAI, and throwing would void a week that cannot
+  be re-fetched.
+- **A partial week must not be archived as a week.** Two guards: the window has to
+  be Monday-to-Sunday, and its token total has to be in line with recent complete
+  weeks. The first version of the second guard compared against the median of *all
+  52* archived buckets and scored a complete week at **6.25×**, because weekly
+  volume grew from ~20T to ~128T over the archived year — against a year-old median
+  a half-finished 60T week reads 0.97 and passes the check built to catch it. A
+  trailing 4-week reference measures completeness; a full-history one measures
+  growth. The complete window now reads 1.009.
+
+Twelve windows is the minimum for a backtest, so the earliest date this family's
+settlements become checkable from a local record is mid-December 2026. Nothing
+automates the capture — no cron job — so the ledger is only as complete as the
+runs.
+
 ## Scoring the candidates
 
 Judged on the dimensions that decide whether a payout can be defended: public and
@@ -211,11 +261,10 @@ traffic.
 
 ## What would change these verdicts
 
-1. **An archive of the request view.** Snapshotting
-   `/api/frontend/v1/rankings/models` weekly costs nothing and, after ~12 weeks,
-   makes the settled prints of the largest listed open-source family auditable and
-   backtestable for the first time. This is the same move the availability ledger
-   made and it is the cheapest open item in the repo. Nothing here does it yet.
+1. ~~**An archive of the request view.**~~ Done — `author-share-snapshot`, one
+   window captured. This verdict stops being "unauditable" for windows from
+   2026-09-20 forward and stays true for the 20 prints before it, which no archive
+   can recover.
 2. **A ladder that pays on a named author's availability** rather than share, at
    which point the snapshot ledger is the settlement record and the basis argument
    in `open-weights-risk.md` stops being hypothetical.

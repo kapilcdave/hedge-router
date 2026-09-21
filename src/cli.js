@@ -7,6 +7,10 @@ import {
   AVAILABILITY_FILE, appendAvailabilityRows, availabilityReport, DEFAULT_WATCHLIST,
   fetchAvailabilitySnapshot, loadAvailabilityLedger, parseWatchlist
 } from './availability.js';
+import {
+  AUTHOR_SHARE_FILE, appendAuthorShareRows, authorShareReport, fetchAuthorShareSnapshot,
+  loadAuthorShareLedger
+} from './authorshare.js';
 import { loadSeriesHistory, runBacktest } from './backtest.js';
 import { loadConfig, validateProxyConfig } from './config.js';
 import { startCollector } from './collector.js';
@@ -336,6 +340,38 @@ async function commandAvailabilityReport(args) {
   else print(report);
 }
 
+async function commandAuthorShareSnapshot(args) {
+  const snapshot = await fetchAuthorShareSnapshot();
+  const file = path.resolve(args.output || AUTHOR_SHARE_FILE);
+  const written = args['dry-run']
+    ? { file, rows: null, appended: 0, replaced: 0, duplicates: 0 }
+    : await appendAuthorShareRows(snapshot.rows, file);
+  print({
+    ledger: written.file, captured_at: snapshot.capturedAt,
+    window_end: snapshot.window?.windowEnd ?? null, week_start: snapshot.window?.weekStart ?? null,
+    authors: snapshot.window?.authors ?? 0, model_rows: snapshot.window?.windowRows ?? 0,
+    stray_rows: snapshot.window?.strayRows ?? 0,
+    requests: snapshot.rows[0]?.windowRequests ?? null,
+    excluded_requests: snapshot.window?.excludedRequests ?? null,
+    appended: written.appended, replaced: written.replaced, duplicates: written.duplicates,
+    ledger_rows: written.rows, dry_run: Boolean(args['dry-run']),
+    // A window still accruing is not a week. Archiving one would put a Monday-morning read of a
+    // couple of hours' traffic into the series as though it were a settled observation.
+    partial_window: snapshot.window?.partial ?? null,
+    calendar_week: snapshot.window?.calendarWeek ?? null,
+    fraction_of_median_week: snapshot.window?.fractionOfMedianWeek ?? null,
+    unresolved: snapshot.unresolved
+  });
+}
+
+async function commandAuthorShareReport(args) {
+  const rows = await loadAuthorShareLedger(path.resolve(args.input || AUTHOR_SHARE_FILE));
+  if (!rows.length) throw new Error('The author-share ledger is empty. Run author-share-snapshot first.');
+  const report = authorShareReport(rows);
+  if (args.output) await writeJsonAtomic(path.resolve(args.output), report);
+  else print(report);
+}
+
 async function commandBacktest(args) {
   if (!args.series || !args.chip || !args.index) throw new Error('--series, --chip, and --index are required');
   const leadDays = String(args['lead-days'] ?? '7').split(',').map((value) => Number(value.trim()));
@@ -460,6 +496,10 @@ Commands:
                                      Snapshot Hugging Face gated/licence state for a watchlist
   availability-report [--input LEDGER] [--output FILE]
                                      Bracket availability changes from the snapshot ledger
+  author-share-snapshot [--output LEDGER] [--dry-run]
+                                     Archive the OpenRouter request-share week Kalshi settles on
+  author-share-report [--input LEDGER] [--output FILE]
+                                     Derive request shares under every denominator cut
   ornn-history --gpu GPU --chip CHIP --start YYYY-MM-DD --end YYYY-MM-DD --output FILE
   otpi-history --lab LAB --start YYYY-MM-DD --end YYYY-MM-DD --output FILE
                                      Download an Ornn GPU index series
@@ -499,6 +539,8 @@ async function main() {
   else if (command === 'kalshi-resolve') await commandKalshiResolve(args);
   else if (command === 'availability-snapshot') await commandAvailabilitySnapshot(args);
   else if (command === 'availability-report') await commandAvailabilityReport(args);
+  else if (command === 'author-share-snapshot') await commandAuthorShareSnapshot(args);
+  else if (command === 'author-share-report') await commandAuthorShareReport(args);
   else if (command === 'ornn-history') await commandOrnnHistory(args);
   else if (command === 'otpi-history') await commandOtpiHistory(args);
   else if (command === 'backtest') await commandBacktest(args);

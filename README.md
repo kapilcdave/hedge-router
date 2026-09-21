@@ -266,6 +266,26 @@ request view serves one trailing week and keeps no archive, so 20 of 25 settled
 prints can no longer be audited by anyone, and the archived view is the wrong
 variable on a top-10 chart whose membership churns by 1.27 authors a week.
 
+### Author share archive
+
+```bash
+node src/cli.js author-share-snapshot          # one window per run, --dry-run to inspect
+node src/cli.js author-share-report            # shares derived under every denominator
+```
+
+Nothing recovers the 20 unauditable prints, so the only available move is to stop
+the next 25 going the same way. `author-share-snapshot` appends one row per author
+per trailing window to `.hedge-router/author-share.ndjson`; first window
+(2026-09-20) holds 71 authors and 5,526,669,903 generation requests, and its
+top-15 shares reproduce the five 2026-09-21 prints to the same 0.086 as the one-off
+script. The ledger stores **counts, not shares** — five simultaneous prints fit
+every denominator from all-authors to top-15 inside 0.9 points, so the cut is not
+identified and `author-share-report` publishes all three rather than freezing a
+guess into the record. A re-run inside the same window neither duplicates nor
+overwrites: the endpoint's counts keep moving after a window closes, so the archive
+holds what was published first. Twelve windows makes the family backtestable, which
+is mid-December 2026 at one a week; nothing automates the capture.
+
 ### Availability snapshot
 
 The availability fields are free to read *now* and impossible to read
