@@ -252,6 +252,20 @@ the same wrong variable as the token index: a self-hoster's exposure is whether
 weights stay downloadable, not what share they serve. The doc lists the
 availability instruments that are machine-readable instead.
 
+A fourth family is 28× larger and was missed: OpenRouter **model-author** share,
+284 markets and 3,080,139 contracts across seven series.
+[`docs/settlement-sources.md`](docs/settlement-sources.md) scores every candidate
+settlement source against what the venue demonstrably accepts — a sweep of all
+14,228 series finds 3,020 distinct sources and not one government or foundation
+feed — and `scripts/author-share.mjs` reproduces the author family's settlement
+variable from a free endpoint. It is **request** share, not the token share the
+rule's wording implies: the two metrics rank the authors differently (Google is
+5.4% of tokens and 18.8% of requests) and five settled prints follow requests to
+0.086 share points against 5.346 for tokens. That does not make it settleable. The
+request view serves one trailing week and keeps no archive, so 20 of 25 settled
+prints can no longer be audited by anyone, and the archived view is the wrong
+variable on a top-10 chart whose membership churns by 1.27 authors a week.
+
 ### Availability snapshot
 
 The availability fields are free to read *now* and impossible to read

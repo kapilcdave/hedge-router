@@ -45,7 +45,16 @@ a demand proxy. It is a good thing to speculate on and a poor thing to hedge wit
 | Open-weights token share | speculator | Vercel AI Gateway chart | **listed**; source has no API, methodology or archive |
 | Model availability / licence | self-hoster with usage-based spend | Hugging Face `gated` + `cardData.license`, unauthenticated | not listed; **daily snapshot now running**, 12 models from 2026-09-21 |
 | Frontier open-weights release | anyone building on open weights | Epoch AI `all_ai_models.csv` (CC-BY), `Open model weights?` | not listed; ~2-week lag, annual tenor only |
-| OSS supply-chain event | **cyber insurers and reinsurers** | CISA KEV feed, OSV.dev, UK Cyber Monitoring Centre | not listed; best data of the four |
+| OSS supply-chain event | **cyber insurers and reinsurers** | CISA KEV feed, OSV.dev, UK Cyber Monitoring Centre | not listed; best data of the four, and **no source of this class appears in any of Kalshi's 14,228 series** |
+
+A fifth is listed and larger than any row above: an OpenRouter **model-author**
+share family, 284 markets and 3,080,139 contracts of lifetime volume. Its
+settlement variable is reproducible from a free unauthenticated endpoint — and it
+is *request* share, not the token share everyone reads off the chart; the two rank
+the authors differently and the settled prints follow requests to 0.09 share
+points. [`settlement-sources.md`](settlement-sources.md) has the recipe, and the
+reason it still is not a hedge: the reproducible view keeps no archive, so 20 of
+25 settled prints can no longer be checked by anyone.
 
 ## The settlement problem, which is the whole problem
 

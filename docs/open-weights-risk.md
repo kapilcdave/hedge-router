@@ -5,6 +5,14 @@ downloadable weights faces a cost shock if those weights stop shipping. That is 
 real exposure. This records what is actually listed against it, what the listed
 contract settles on, and what the traded data says about the premise.
 
+> **Superseded in part by [`settlement-sources.md`](settlement-sources.md)**, which
+> enumerates Kalshi's whole catalog and finds two things this document gets wrong.
+> `KXOPENSOURCESHARE` is not the only listed open-source family — an OpenRouter
+> author-share family trades 3,080,139 contracts across 284 markets, 28× this one —
+> and its settlement variable *is* reproducible from a free endpoint, but it is
+> **request** share, not token share. The supply-chain sources recommended at the
+> bottom of this document have no precedent in any of Kalshi's 14,228 series.
+
 Two things are separable and get conflated:
 
 - **availability** — can I still download and run weights, under what licence
@@ -18,7 +26,12 @@ one that closed the token-price work in [`token-price-basis.md`](token-price-bas
 `KXOPENSOURCESHARE` is a `greater` ladder, so a YES at strike `k` means the print
 was above `k` and a NO means it was not: the highest YES and lowest NO bracket the
 print. That recovers a history of the settlement variable without any access to
-the publisher. `scripts/opensource-share.mjs` regenerates the whole table:
+the publisher. `scripts/opensource-share.mjs` regenerates the whole table. The
+bracket is sound; `expiration_value` is not, and
+[`settlement-sources.md`](settlement-sources.md) shows why — the field carries the
+literal string `"No"` on some all-NO ladders, and on the one case that could be
+checked that meant *the ladder was listed above the print*, not that the subject
+fell into an `others` bucket.
 
 | close date | markets | volume | implied open-weights share |
 | --- | ---: | ---: | --- |
@@ -151,7 +164,11 @@ substrate the AI reading does not, and all three of these were verified:
 
 The CMC is the closest thing in existence to a purpose-built public settlement
 index for cyber loss — it was created by the insurance market to *be* a common
-benchmark, which is the opposite provenance from an undocumented vendor chart. Its
+benchmark, which is the opposite provenance from an undocumented vendor chart.
+That provenance is also why it is a proposal rather than a candidate: a sweep of
+all 14,228 Kalshi series found **no CISA, NVD, OSV, npm, PyPI, OpenSSF or CMC
+source anywhere in the catalog**, so none of these three is a source class the
+venue has ever underwritten. Its
 disqualifying property for short-dated binaries is stated on its own methodology
 page: **the target is 30 days from the event being known**, by committee, and in
 2025 it ran longer. KEV and OSV settle fast and mechanically, but a CVE being
