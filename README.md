@@ -252,6 +252,28 @@ the same wrong variable as the token index: a self-hoster's exposure is whether
 weights stay downloadable, not what share they serve. The doc lists the
 availability instruments that are machine-readable instead.
 
+### Availability snapshot
+
+The availability fields are free to read *now* and impossible to read
+historically — Hugging Face serves `gated` and `cardData.license` unauthenticated,
+but the commits endpoint that would date a change is 401 without a token. So the
+history has to be owned:
+
+```sh
+hedge-router availability-snapshot --watchlist examples/availability-watchlist.json
+hedge-router availability-report
+```
+
+One row per model per UTC date in `.hedge-router/availability.ndjson`, first
+captured 2026-09-21 across 12 frontier open-weight models, 12 of 12 resolved. A
+change is reported as a bracket — `(previous observation, this one]` — narrowed by
+`lastModified` only when the commit hash also moved, because gating is a repo
+setting rather than a commit. A non-200 is written as `unresolved` with no field
+values: a model id that does not exist answers **401**, exactly as a deleted or
+newly private repo would, so disappearance is the one event this source cannot
+confirm and a bad collector would report it every time the network blinked.
+[`docs/availability-snapshot.md`](docs/availability-snapshot.md) records the rest.
+
 ### Retrospective backtest
 
 Forward paper trading accumulates one settlement event per week. `backtest`

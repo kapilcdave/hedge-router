@@ -3,6 +3,10 @@ import { copyFile, readFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  AVAILABILITY_FILE, appendAvailabilityRows, availabilityReport, DEFAULT_WATCHLIST,
+  fetchAvailabilitySnapshot, loadAvailabilityLedger, parseWatchlist
+} from './availability.js';
 import { loadSeriesHistory, runBacktest } from './backtest.js';
 import { loadConfig, validateProxyConfig } from './config.js';
 import { startCollector } from './collector.js';
@@ -305,6 +309,33 @@ async function commandOtpiHistory(args) {
   });
 }
 
+async function commandAvailabilitySnapshot(args) {
+  const models = args.watchlist
+    ? parseWatchlist(args.watchlist === '-' ? await readStdin() : await readFile(path.resolve(args.watchlist), 'utf8'))
+    : [...DEFAULT_WATCHLIST];
+  const snapshot = await fetchAvailabilitySnapshot({ models });
+  const file = path.resolve(args.output || AVAILABILITY_FILE);
+  const written = args['dry-run']
+    ? { file, rows: null, appended: 0, replaced: 0, duplicates: 0 }
+    : await appendAvailabilityRows(snapshot.rows, file);
+  print({
+    ledger: written.file, captured_at: snapshot.capturedAt, models: snapshot.models,
+    resolved: snapshot.rows.length - snapshot.unresolved.length,
+    appended: written.appended, replaced: written.replaced, duplicates: written.duplicates,
+    ledger_rows: written.rows, dry_run: Boolean(args['dry-run']),
+    // An unresolved read is not an availability event; it is a read that produced no value.
+    unresolved: snapshot.unresolved
+  });
+}
+
+async function commandAvailabilityReport(args) {
+  const rows = await loadAvailabilityLedger(path.resolve(args.input || AVAILABILITY_FILE));
+  if (!rows.length) throw new Error('The availability ledger is empty. Run availability-snapshot first.');
+  const report = availabilityReport(rows);
+  if (args.output) await writeJsonAtomic(path.resolve(args.output), report);
+  else print(report);
+}
+
 async function commandBacktest(args) {
   if (!args.series || !args.chip || !args.index) throw new Error('--series, --chip, and --index are required');
   const leadDays = String(args['lead-days'] ?? '7').split(',').map((value) => Number(value.trim()));
@@ -425,6 +456,10 @@ Commands:
                                      Capture public prices before settlement
   kalshi-resolve --input FILE --output FILE
                                      Resolve captured snapshots after settlement
+  availability-snapshot [--watchlist FILE] [--output LEDGER] [--dry-run]
+                                     Snapshot Hugging Face gated/licence state for a watchlist
+  availability-report [--input LEDGER] [--output FILE]
+                                     Bracket availability changes from the snapshot ledger
   ornn-history --gpu GPU --chip CHIP --start YYYY-MM-DD --end YYYY-MM-DD --output FILE
   otpi-history --lab LAB --start YYYY-MM-DD --end YYYY-MM-DD --output FILE
                                      Download an Ornn GPU index series
@@ -462,6 +497,8 @@ async function main() {
   else if (command === 'pilot-report') await commandPilotReport(args);
   else if (command === 'kalshi-snapshot') await commandKalshiSnapshot(args);
   else if (command === 'kalshi-resolve') await commandKalshiResolve(args);
+  else if (command === 'availability-snapshot') await commandAvailabilitySnapshot(args);
+  else if (command === 'availability-report') await commandAvailabilityReport(args);
   else if (command === 'ornn-history') await commandOrnnHistory(args);
   else if (command === 'otpi-history') await commandOtpiHistory(args);
   else if (command === 'backtest') await commandBacktest(args);

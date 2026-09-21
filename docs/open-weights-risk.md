@@ -110,7 +110,18 @@ that the *current* value is free but the *history* is not — the commits endpoi
 needs a token, so a settlement rule over "did the licence change" requires either
 authenticated access or an independently maintained daily snapshot. Snapshotting
 those two fields daily across a watchlist costs nothing and is the cheapest thing
-that would make such a contract settleable. Nothing in this repo does it yet.
+that would make such a contract settleable.
+
+`hedge-router availability-snapshot` now does it: 12 models, one row per model per
+UTC date, first captured 2026-09-21 with 12 of 12 resolved. Two corrections to the
+table above came out of building it. A model id that does not exist returns **401**,
+not 404 — the same status a deleted or newly private repo would return — so
+disappearance, the strongest availability event, is the one this source cannot
+confirm without a token. And `cardData.license` is not sufficient on its own:
+`Qwen/Qwen2.5-72B-Instruct` is `license: "other"` with the terms in `license_name`,
+and `deepseek-ai/DeepSeek-V3` carries no `cardData.license` at all.
+[`availability-snapshot.md`](availability-snapshot.md) records the ledger's
+semantics and the four ways a naive version settles wrong.
 
 Adjacent series exist as shells with zero markets listed — `KXAIOPEN` (frontier
 open-source model), `KXBESTLLMOS`, `KXOPENSOURCEOAI`, `KXGROK2OS`, `KXCMECOMPUTE`
@@ -169,7 +180,9 @@ availability". It fails if:
    settlement-risk objection narrows to methodology revisions only.
 3. Availability events and share moves turn out to be contemporaneous — testable
    for free by snapshotting Hugging Face `gated`/`license` daily and comparing
-   against the next settled bracket. This is the cheapest open test.
+   against the next settled bracket. This is the cheapest open test, and the
+   snapshot side of it is now running; the ledger starts 2026-09-21 and holds one
+   day, so there is nothing to compare yet.
 
 And the premise claim, "the open-weights share is rising", fails if the bracket
 series reverses. It is six settled days on one gateway; it should be re-run, not

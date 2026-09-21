@@ -1,0 +1,16 @@
+{
+  "models": [
+    "meta-llama/Llama-3.1-8B-Instruct",
+    "meta-llama/Llama-3.3-70B-Instruct",
+    "mistralai/Mistral-7B-Instruct-v0.3",
+    "mistralai/Mixtral-8x7B-Instruct-v0.1",
+    "Qwen/Qwen2.5-72B-Instruct",
+    "deepseek-ai/DeepSeek-V3",
+    "deepseek-ai/DeepSeek-R1",
+    "google/gemma-2-9b-it",
+    "microsoft/Phi-3-mini-4k-instruct",
+    "openai/gpt-oss-120b",
+    "moonshotai/Kimi-K2-Instruct",
+    "zai-org/GLM-4.5"
+  ]
+}

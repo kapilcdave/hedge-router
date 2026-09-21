@@ -43,7 +43,7 @@ a demand proxy. It is a good thing to speculate on and a poor thing to hedge wit
 | contract | buyer | settles on | status |
 | --- | --- | --- | --- |
 | Open-weights token share | speculator | Vercel AI Gateway chart | **listed**; source has no API, methodology or archive |
-| Model availability / licence | self-hoster with usage-based spend | Hugging Face `gated` + `cardData.license`, unauthenticated | not listed; needs a daily snapshot |
+| Model availability / licence | self-hoster with usage-based spend | Hugging Face `gated` + `cardData.license`, unauthenticated | not listed; **daily snapshot now running**, 12 models from 2026-09-21 |
 | Frontier open-weights release | anyone building on open weights | Epoch AI `all_ai_models.csv` (CC-BY), `Open model weights?` | not listed; ~2-week lag, annual tenor only |
 | OSS supply-chain event | **cyber insurers and reinsurers** | CISA KEV feed, OSV.dev, UK Cyber Monitoring Centre | not listed; best data of the four |
 
@@ -63,7 +63,11 @@ exactly the event a self-hoster fears, and it is a public single-field read. The
 weakness is history, not access: the commit endpoint requires a token, so a
 "did the licence change" rule needs either authenticated access or an independent
 daily snapshot. **Snapshotting those two fields across a watchlist costs nothing
-and is the cheapest thing that makes an availability contract settleable.**
+and is the cheapest thing that makes an availability contract settleable** — that
+snapshot runs in this repo from 2026-09-21, 12 models, 12 of 12 resolved. One limit
+found in building it: a model id that does not exist answers **401**, the same as a
+deleted or newly private repo would, so *disappearance* is the one availability
+event this source cannot confirm unauthenticated.
 
 For the supply-chain row: CISA's KEV catalog publishes 1,716 entries as public CSV
 and JSON with CVE, vendor/product, date added and a ransomware flag. OSV.dev is
