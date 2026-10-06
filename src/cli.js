@@ -15,6 +15,9 @@ import { loadSeriesHistory, runBacktest } from './backtest.js';
 import { loadConfig, validateProxyConfig } from './config.js';
 import { startCollector } from './collector.js';
 import { runDashboard } from './dashboard.js';
+import {
+  ARM_ENV, ARM_PHRASE, Executor, executeSignals, executionPaths, loadCredentials
+} from './execute.js';
 import { createKalshiSnapshots, resolveKalshiSnapshots } from './kalshi.js';
 import { normalizeGatewayExport } from './ingest.js';
 import { evaluateMarkets, forecastMarkets } from './market.js';
@@ -436,6 +439,78 @@ async function commandSync(args) {
   print(await telemetry.sync());
 }
 
+async function commandLiveStatus(args) {
+  const paths = executionPaths(args.dir ? path.resolve(args.dir) : undefined);
+  const executor = new Executor({ armed: false, paths });
+  const preflight = await executor.preflight();
+  print({
+    would_arm: preflight.blockers.length === 0,
+    gate_open: preflight.gate.open,
+    gate: preflight.gate,
+    kill_switch: { path: paths.killSwitch, present: preflight.halted },
+    arming_phrase_set: preflight.confirmed,
+    credentials_available: preflight.credentials_available,
+    blockers: preflight.blockers,
+    limits: executor.limits,
+    journal: paths.journal
+  });
+}
+
+// `--live` is necessary but not sufficient: executeSignals re-checks the gate, the arming phrase,
+// the kill switch and the credential, and downgrades to a dry run that reports every blocker.
+async function commandLiveOpen(args) {
+  if (!args.index || !args.markets) throw new Error('--index and --markets are required');
+  const index = await readJson(path.resolve(args.index));
+  const marketDocument = await readJson(path.resolve(args.markets));
+  const markets = marketDocument.snapshots || marketDocument;
+  const aggregates = args.aggregates ? await readJson(path.resolve(args.aggregates)) : [];
+  const signals = forecastMarkets({
+    index, markets, aggregates,
+    minimumTraining: Number(args['minimum-training'] || 5),
+    edge: Number(args.edge || 0.05)
+  });
+  const limits = {};
+  if (args['max-contracts'] != null) limits.maxContractsPerOrder = Number(args['max-contracts']);
+  if (args['max-orders'] != null) limits.maxOrdersPerRun = Number(args['max-orders']);
+  if (args['max-notional'] != null) limits.maxNotionalPerOrder = Number(args['max-notional']);
+  if (args['max-notional-run'] != null) limits.maxNotionalPerRun = Number(args['max-notional-run']);
+  if (args['min-seconds-to-close'] != null) limits.minSecondsToClose = Number(args['min-seconds-to-close']);
+  const result = await executeSignals({
+    signals,
+    live: args.live === true || args.live === 'true',
+    limits,
+    paths: executionPaths(args.dir ? path.resolve(args.dir) : undefined),
+    postOnly: !(args['allow-taker'] === true || args['allow-taker'] === 'true')
+  });
+  if (args.output) await writeJsonAtomic(path.resolve(args.output), result);
+  print(result);
+}
+
+async function commandLivePositions(args) {
+  const executor = new Executor({
+    armed: true, paths: executionPaths(args.dir ? path.resolve(args.dir) : undefined)
+  });
+  const credentials = await loadCredentials();
+  if (!credentials.available) throw new Error(`Set ${process.env.KALSHI_API_KEY_ID ? 'KALSHI_PRIVATE_KEY_PATH' : 'KALSHI_API_KEY_ID'} to read positions`);
+  executor.credentials = credentials;
+  print({ balance_usd: await executor.balance(), positions: await executor.positions() });
+}
+
+async function commandLiveCancel(args) {
+  const orderId = args.order || args._[0];
+  if (!orderId) throw new Error('--order ORDER_ID is required');
+  const live = args.live === true || args.live === 'true';
+  const executor = new Executor({
+    armed: live, paths: executionPaths(args.dir ? path.resolve(args.dir) : undefined)
+  });
+  // A cancel reduces exposure, so it is not gated on the research gate; it still requires the
+  // arming phrase, because an unarmed process must never open a mutating socket.
+  if (live && process.env[ARM_ENV] !== ARM_PHRASE) {
+    throw new Error(`Live cancel requires ${ARM_ENV}='${ARM_PHRASE}'`);
+  }
+  print(await executor.cancel(orderId));
+}
+
 async function commandInit(args) {
   const destination = path.resolve(args.output || 'hedge-router.config.json');
   const source = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'hedge-router.config.example.json');
@@ -510,6 +585,14 @@ Commands:
                                      Replay settled markets from historical quotes
   gate [--events FILE] [--market EVALUATION_FILE]
                                      Check independent data and market gates
+  live-status [--dir DIR]            Report whether the order path would arm, and why not
+  live-open --index FILE --markets SNAPSHOT [--aggregates FILE]
+    [--live] [--allow-taker] [--max-contracts N] [--max-orders N]
+    [--max-notional USD] [--max-notional-run USD]
+    [--min-seconds-to-close SEC] [--output FILE] [--dir DIR]
+                                     Send gated hedge orders; dry-run unless --live and gate open
+  live-positions [--dir DIR]         Read account balance and open positions
+  live-cancel --order ID [--live]    Cancel a resting order
   export --output FILE               Export sanitized local telemetry as JSON
   sync [--config FILE]               Retry the durable telemetry outbox
   delete-data --confirm DELETE       Delete remote and local telemetry
@@ -545,6 +628,10 @@ async function main() {
   else if (command === 'otpi-history') await commandOtpiHistory(args);
   else if (command === 'backtest') await commandBacktest(args);
   else if (command === 'gate') await commandGate(args);
+  else if (command === 'live-status') await commandLiveStatus(args);
+  else if (command === 'live-open') await commandLiveOpen(args);
+  else if (command === 'live-positions') await commandLivePositions(args);
+  else if (command === 'live-cancel') await commandLiveCancel(args);
   else if (command === 'export') await commandExport(args);
   else if (command === 'sync') await commandSync(args);
   else if (command === 'delete-data') await commandDeleteData(args);

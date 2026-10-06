@@ -18,8 +18,9 @@ Agentgateway / Weave Router / any OTLP-capable gateway
               forecast → paper hedge → P&L
 ```
 
-The research pipeline is deliberately paper-only. No command in this repository
-places a live order.
+The research pipeline is paper-only by default. The order path exists
+([`src/execute.js`](src/execute.js)) and is held closed by the research gate, which has not
+opened: see [Execution](#execution).
 
 ## Quick start
 
@@ -378,6 +379,70 @@ Each cycle is resumable and locked against overlap. It refreshes index history,
 aggregates gateway exposure, settles prior paper positions, captures fresh market
 quotes, forecasts at each contract's actual horizon, places qualifying paper
 orders, and writes an immutable run summary.
+
+## Execution
+
+The order path is built. It has never placed an order, because the thing that authorises it is
+`evaluate`'s gate and that gate is false.
+
+```sh
+hedge-router live-status
+```
+
+```json
+{
+  "would_arm": false,
+  "blockers": [
+    { "reason": "gate-closed", "detail": "no passing evaluation: no evaluation artifact" },
+    { "reason": "not-confirmed", "detail": "HEDGE_ROUTER_LIVE_CONFIRM is not set to the arming phrase" },
+    { "reason": "missing-credentials", "detail": "KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY_PATH are not both set" }
+  ]
+}
+```
+
+`live-open` takes the same forecast `paper-open` does and turns it into venue order bodies. It is
+a dry run unless *every* interlock is satisfied, and a dry run still prints and journals the exact
+request it would have sent:
+
+```sh
+hedge-router live-open --index .hedge-router/ornn-h100.json \
+  --markets .hedge-router/kalshi-open.json --aggregates .hedge-router/daily.json \
+  --max-contracts 10 --max-notional 2 --max-notional-run 10
+
+hedge-router live-positions
+hedge-router live-cancel --order ORDER_ID --live
+```
+
+Arming requires all five of:
+
+| Interlock | Why it is separate |
+| --- | --- |
+| `evaluate` gate is `true` | 30 independent settlements, 5% Brier lift over *both* baselines, positive paper P&L |
+| `HEDGE_ROUTER_LIVE_CONFIRM='I accept live order risk'` | A phrase cannot be set by a stray `export FOO=1` |
+| `KALSHI_API_KEY_ID` + `KALSHI_PRIVATE_KEY_PATH` readable | A read-only key is named as such, not reported as a bad request |
+| No `.hedge-router/HALT` file | `touch .hedge-router/HALT` stops the path without a deploy |
+| Explicit `--live` | Absence of the flag is a dry run, not a prompt |
+
+Anything missing downgrades to a dry run that reports which interlock failed. A closed gate is the
+normal state, not an error.
+
+Inside the envelope, the caps are hard and enforced before any send: 10 contracts and $2 per
+order, $10 per run, and no resting order inside 15 minutes of close, because settlement is the one
+exposure a cancel cannot undo. `client_order_id` is derived from the market, side, price and
+observation time, so replaying a cycle after a timeout is the same order rather than a second one.
+Orders are `post_only` by default — an accidental taker fill on a thin book is the documented way
+this market family takes money off you, and `--allow-taker` is the explicit opt-out. Every
+attempt, dry or live, appends to `.hedge-router/live/orders.ndjson` before the socket opens.
+
+Two venue details that cost real time to rediscover: the legacy `POST /portfolio/orders` answers
+**410 Gone**, so the create path is `/portfolio/events/orders`; and its `side` is `bid`/`ask`
+against the *yes* price, so buying NO at 0.30 is an `ask` at 0.70. Inverting that buys the
+opposite of the intended hedge at a plausible-looking price.
+
+**What this does not mean.** Execution being built does not make the hedge work. The backtest
+below finds the demand signal slightly *worse* than index persistence, so arming today would pay
+fees to express a hypothesis this repository has already failed to support. The gate is the
+conclusion of the research, and it stays shut until the research changes it.
 
 ## Optional legacy proxy
 
