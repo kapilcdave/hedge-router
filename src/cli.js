@@ -18,6 +18,8 @@ import { runDashboard } from './dashboard.js';
 import {
   ARM_ENV, ARM_PHRASE, Executor, executeSignals, executionPaths, loadCredentials
 } from './execute.js';
+import { cmeDryRunIntent, sizeCmeHedge } from './cme.js';
+import { venueStatus } from './venues.js';
 import { createKalshiSnapshots, resolveKalshiSnapshots } from './kalshi.js';
 import { normalizeGatewayExport } from './ingest.js';
 import { evaluateMarkets, forecastMarkets } from './market.js';
@@ -439,6 +441,23 @@ async function commandSync(args) {
   print(await telemetry.sync());
 }
 
+async function commandVenues() {
+  print(venueStatus());
+}
+
+// Sizing and a journal-shaped dry-run intent only: there is no CME order path to arm.
+async function commandCmeSize(args) {
+  if (!args.chip || !args.month || !args['gpu-hours'] || !args.price) {
+    throw new Error('--chip, --month, --gpu-hours, and --price are required');
+  }
+  const sizing = sizeCmeHedge({
+    chip: args.chip, month: args.month, gpuHours: Number(args['gpu-hours']),
+    entryPrice: Number(args.price), hedgeRatio: Number(args['hedge-ratio'] ?? 1),
+    member: args.member === true
+  });
+  print(args.limit == null ? sizing : { sizing, intent: cmeDryRunIntent({ sizing, limitPrice: Number(args.limit) }) });
+}
+
 async function commandLiveStatus(args) {
   const paths = executionPaths(args.dir ? path.resolve(args.dir) : undefined);
   const executor = new Executor({ armed: false, paths });
@@ -585,6 +604,10 @@ Commands:
                                      Replay settled markets from historical quotes
   gate [--events FILE] [--market EVALUATION_FILE]
                                      Check independent data and market gates
+  venues                             List each venue and what blocks trading on it
+  cme-size --chip H100|B200 --month YYYY-MM --gpu-hours N --price USD
+    [--hedge-ratio R] [--limit USD] [--member]
+                                     Size a CME compute future hedge (no order path)
   live-status [--dir DIR]            Report whether the order path would arm, and why not
   live-open --index FILE --markets SNAPSHOT [--aggregates FILE]
     [--live] [--allow-taker] [--max-contracts N] [--max-orders N]
@@ -628,6 +651,8 @@ async function main() {
   else if (command === 'otpi-history') await commandOtpiHistory(args);
   else if (command === 'backtest') await commandBacktest(args);
   else if (command === 'gate') await commandGate(args);
+  else if (command === 'venues') await commandVenues();
+  else if (command === 'cme-size') await commandCmeSize(args);
   else if (command === 'live-status') await commandLiveStatus(args);
   else if (command === 'live-open') await commandLiveOpen(args);
   else if (command === 'live-positions') await commandLivePositions(args);
