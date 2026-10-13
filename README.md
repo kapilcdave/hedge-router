@@ -9,7 +9,7 @@ Hedge Router consumes their metadata, measures compute exposure, builds a demand
 signal, and evaluates risk-limited paper hedges against compute-price markets.
 
 ```text
-Agentgateway / Weave Router / any OTLP-capable gateway
+Agentgateway / Weave Router / Cloudflare / Vercel / any OTLP gateway
                          ↓
               metadata-only normalization
                          ↓
@@ -28,18 +28,19 @@ The runtime has no third-party dependencies and requires Node 20 or newer.
 
 ```sh
 npm link
-hedge-router init
+hedge init
 
 # Weave's /v1/analytics/routing-decisions export is NDJSON.
-hedge-router ingest --format weave --input routing-decisions.ndjson
+hedge ingest --format weave --input routing-decisions.ndjson
 
 # Agentgateway JSON access logs and OTLP JSON exports are also supported.
-hedge-router ingest --format agentgateway --input agentgateway.jsonl
-hedge-router ingest --format otel --source agentgateway-prod --input traces.json
+hedge ingest --format agentgateway --input agentgateway.jsonl
+# Cloudflare AI Gateway logs and Vercel AI Gateway trace drains are covered below.
+hedge ingest --format otel --source agentgateway-prod --input traces.json
 
-hedge-router report
-hedge-router aggregate --minimum 1 --output .hedge-router/daily.json
-hedge-router dashboard
+hedge report
+hedge aggregate --minimum 1 --output .hedge-router/daily.json
+hedge dashboard
 ```
 
 Use `--input -` to read stdin, `--dry-run` to validate without writing, and
@@ -50,7 +51,7 @@ not appended.
 Auto-detection works for known shapes:
 
 ```sh
-hedge-router ingest --input gateway-export.ndjson
+hedge ingest --input gateway-export.ndjson
 ```
 
 ## Supported inputs
@@ -66,7 +67,7 @@ curl -sS --compressed \
   "$WEAVE_ROUTER_URL/v1/analytics/routing-decisions?since=2026-08-01T00:00:00Z&limit=10000" \
   -o routing-decisions.ndjson
 
-hedge-router ingest --format weave --input routing-decisions.ndjson
+hedge ingest --format weave --input routing-decisions.ndjson
 ```
 
 Hedge Router uses the chosen model/provider, token counts, realized input/output
@@ -88,7 +89,7 @@ config:
 ```sh
 kubectl logs deployment/agentgateway-proxy -n agentgateway-system \
   > agentgateway.jsonl
-hedge-router ingest --format agentgateway --input agentgateway.jsonl
+hedge ingest --format agentgateway --input agentgateway.jsonl
 ```
 
 The default `key=value` access-log format is accepted too. When Agentgateway has
@@ -97,6 +98,50 @@ still records tokens and operational exposure. OTLP JSON uses the same
 `gen_ai.request.model`, `gen_ai.response.model`, `gen_ai.provider.name`, and
 `gen_ai.usage.*` attributes.
 
+### Cloudflare AI Gateway
+
+Pull request logs with the logs API (`per_page` maxes at 50, so page through) and ingest the
+saved response as-is; the `{success, result, result_info}` envelope is unwrapped for you:
+
+```sh
+curl -sS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+  "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/ai-gateway/gateways/$GATEWAY_ID/logs?per_page=50&page=1" \
+  -o cloudflare-logs.json
+
+hedge ingest --format cloudflare --input cloudflare-logs.json
+```
+
+Hedge Router reads provider, model, `tokens_in`/`tokens_out`, `duration`, `cost`, `status_code`,
+`success`, and `cached`. It never reads `metadata` (caller-supplied, usually a user or tenant ID),
+`path`, or request/response bodies, and the gateway's own prompt/response logging can stay off
+(`cf-aig-collect-log-payload: false`). Cloudflare's API reference does not state units for `duration`
+and `cost`; they are read as milliseconds and USD, which is what the dashboard shows. A gateway-cache
+hit never reaches the provider, so it is recorded with its input as fully cached and
+`route_reason: external_cache_hit`.
+
+### Vercel AI Gateway
+
+Two sources, both metadata-only. A **trace drain** (Team Settings → Drains, OTLP/HTTP, JSON encoding)
+is the continuous feed:
+
+```sh
+hedge ingest --format vercel --input vercel-ai-gateway-traces.json
+```
+
+Each gateway request is one trace: a root span plus routing, model-attempt, and per-provider-attempt
+child spans. Only the root span is a request. Provider-attempt spans are counted into `attempts`
+(more than one marks the request `external_failover`), and the child spans show up under `skipped`,
+which is expected. Tokens come from `gen_ai.usage.*`, the served provider from
+`vercel.ai_gateway.provider`, and cost from `vercel.ai_gateway.cost.total` when the currency is USD
+(otherwise spend stays absent). A BYOK request bills at the provider, so its gateway `total` is 0;
+Hedge Router uses `vercel.ai_gateway.cost.market` instead. Tags, user IDs, API-key IDs and names,
+project/deployment IDs, and referring-site fields are not read.
+
+A single `GET /v1/generation?id=gen_…` response also ingests (`--format vercel`). The
+`/v1/report` spend report is pre-aggregated by day/model/tag, has no per-request rows, and cannot feed
+the daily demand features, so it is not ingested. Neither source declares a baseline, so
+`baseline_model` stays empty and savings are not claimed.
+
 ### Claude Code
 
 Local coding-agent transcripts are a usable demand ledger when no gateway sits in
@@ -104,7 +149,7 @@ front of the model:
 
 ```sh
 cat ~/.claude/projects/*/*.jsonl \
-  | hedge-router ingest --format claude-code --input -
+  | hedge ingest --format claude-code --input -
 ```
 
 Only the assistant turn's model, timestamp, and token counts cross the privacy
@@ -124,11 +169,11 @@ imports. The normalized ledger is `.hedge-router/events.ndjson`.
 Useful commands:
 
 ```sh
-hedge-router report
-hedge-router status
-hedge-router aggregate --minimum 1 --output .hedge-router/daily.json
-hedge-router gate --market .hedge-router/evaluation.json
-hedge-router export --output metadata-export.json
+hedge report
+hedge status
+hedge aggregate --minimum 1 --output .hedge-router/daily.json
+hedge gate --market .hedge-router/evaluation.json
+hedge export --output metadata-export.json
 ```
 
 `report` summarizes calls, tokens, realized spend, gateway/model mix, latency,
@@ -141,7 +186,7 @@ remote studies should retain the configured privacy threshold.
 · paper +$0.42`. A companion plugin for Claude Code, Codex, and OpenCode lives in
 [`plugins/hedge-router-status`](plugins/hedge-router-status/README.md).
 
-`hedge-router demo` renders the same dashboard without a local ledger. It is a
+`hedge demo` renders the same dashboard without a local ledger. It is a
 recording, not a simulation: the gateway rows are real ingested requests and the
 hedges, Brier scores, and P&L are exactly what
 [`backtest`](#retrospective-backtest) produced, losses included. The demo cannot
@@ -154,9 +199,9 @@ paths, filenames, tool arguments, tool output, credentials, email addresses, and
 gateway user IDs are never written to the exposure ledger. Session identifiers
 are pseudonymized with a rotating local salt. Telemetry upload is off by default.
 
-Run `hedge-router delete-data --confirm DELETE` to remove the local event ledger
+Run `hedge delete-data --confirm DELETE` to remove the local event ledger
 and pseudonymous identity. Failed optional uploads stay in a durable,
-metadata-only outbox and can be retried with `hedge-router sync`.
+metadata-only outbox and can be retried with `hedge sync`.
 
 The optional authenticated collector accepts only the normalized metadata
 allowlist, deduplicates request IDs, enforces retention, and exposes aggregates
@@ -164,7 +209,7 @@ only after the configured cohort threshold:
 
 ```sh
 export HEDGE_ROUTER_COLLECTOR_TOKEN='replace-with-at-least-16-random-characters'
-hedge-router collect --config hedge-router.config.json
+hedge collect --config hedge-router.config.json
 ```
 
 ## Paper-hedge research
@@ -175,39 +220,39 @@ the public market price. It never trains on data observed after the forecast.
 
 ```sh
 # Capture executable market prices before close.
-hedge-router kalshi-snapshot --series KXH100WS --chip H100 \
+hedge kalshi-snapshot --series KXH100WS --chip H100 \
   --fee-rate 0.07 --slippage 0.01 --output .hedge-router/kalshi-open.json
 
 # Refresh the public compute-price index.
-hedge-router ornn-history --gpu H100 --chip H100 \
+hedge ornn-history --gpu H100 --chip H100 \
   --start 2026-06-01 --end 2026-08-28 \
   --merge .hedge-router/ornn-h100.json --output .hedge-router/ornn-h100.json
 
 # The token-price index, for a bill denominated in tokens rather than GPU-hours.
 # Free for four labs over a trailing month; the command reports what was withheld.
-hedge-router otpi-history --lab anthropic --chip ANTHROPIC-TOK \
+hedge otpi-history --lab anthropic --chip ANTHROPIC-TOK \
   --start 2026-08-08 --end 2026-09-07 --output .hedge-router/otpi-anthropic.json
 
 # Build demand features from any supported gateway.
-hedge-router aggregate --minimum 1 --output .hedge-router/daily.json
+hedge aggregate --minimum 1 --output .hedge-router/daily.json
 
 # Record fresh, trained, risk-limited paper orders.
-hedge-router paper-open --index .hedge-router/ornn-h100.json \
+hedge paper-open --index .hedge-router/ornn-h100.json \
   --markets .hedge-router/kalshi-open.json --aggregates .hedge-router/daily.json \
   --portfolio .hedge-router/paper.json --output .hedge-router/paper.json \
   --bankroll 1000 --risk-percent 1 --max-event-percent 5
 
 # Resolve and settle without replacing the entry-time snapshot.
-hedge-router kalshi-resolve \
+hedge kalshi-resolve \
   --input .hedge-router/kalshi-open.json --output .hedge-router/kalshi-resolved.json
-hedge-router paper-settle --portfolio .hedge-router/paper.json \
+hedge paper-settle --portfolio .hedge-router/paper.json \
   --markets .hedge-router/kalshi-resolved.json --output .hedge-router/paper.json
 
 # Evaluate strictly out of sample.
-hedge-router evaluate --index .hedge-router/ornn-h100.json \
+hedge evaluate --index .hedge-router/ornn-h100.json \
   --markets .hedge-router/kalshi-resolved.json --aggregates .hedge-router/daily.json \
   --output .hedge-router/evaluation.json
-hedge-router gate --market .hedge-router/evaluation.json
+hedge gate --market .hedge-router/evaluation.json
 ```
 
 The market gate requires at least 30 independent settlement events, a 5%
@@ -295,8 +340,8 @@ but the commits endpoint that would date a change is 401 without a token. So the
 history has to be owned:
 
 ```sh
-hedge-router availability-snapshot --watchlist examples/availability-watchlist.json
-hedge-router availability-report
+hedge availability-snapshot --watchlist examples/availability-watchlist.json
+hedge availability-report
 ```
 
 One row per model per UTC date in `.hedge-router/availability.ndjson`, first
@@ -320,7 +365,7 @@ that were one-sided, crossed, or published after the decision time are skipped
 with a stated reason rather than filled at a midpoint.
 
 ```sh
-hedge-router backtest --series KXH100WS --chip H100 \
+hedge backtest --series KXH100WS --chip H100 \
   --index .hedge-router/ornn-h100.json --aggregates .hedge-router/daily.json \
   --lead-days 1,3,7,14 --fee-rate 0.07 --slippage 0.01 \
   --save-history .hedge-router/kalshi-history.json \
@@ -365,13 +410,13 @@ honest answer.
 ### Automated pilot
 
 ```sh
-hedge-router pilot-run --series KXH100WS --gpu H100 --chip H100 \
+hedge pilot-run --series KXH100WS --gpu H100 --chip H100 \
   --minimum-contributors 1
 
-hedge-router pilot-daemon --series KXH100WS --gpu H100 --chip H100 \
+hedge pilot-daemon --series KXH100WS --gpu H100 --chip H100 \
   --minimum-contributors 1 --interval-hours 24
 
-hedge-router pilot-report --chip H100 --days 7 \
+hedge pilot-report --chip H100 --days 7 \
   --output .hedge-router/pilot/weekly.json
 ```
 
@@ -386,7 +431,7 @@ The order path is built. It has never placed an order, because the thing that au
 `evaluate`'s gate and that gate is false.
 
 ```sh
-hedge-router live-status
+hedge live-status
 ```
 
 ```json
@@ -405,12 +450,12 @@ a dry run unless *every* interlock is satisfied, and a dry run still prints and 
 request it would have sent:
 
 ```sh
-hedge-router live-open --index .hedge-router/ornn-h100.json \
+hedge live-open --index .hedge-router/ornn-h100.json \
   --markets .hedge-router/kalshi-open.json --aggregates .hedge-router/daily.json \
   --max-contracts 10 --max-notional 2 --max-notional-run 10
 
-hedge-router live-positions
-hedge-router live-cancel --order ORDER_ID --live
+hedge live-positions
+hedge live-cancel --order ORDER_ID --live
 ```
 
 Arming requires all five of:

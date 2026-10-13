@@ -544,11 +544,11 @@ async function commandInit(args) {
 }
 
 function help() {
-  print(`Usage: hedge-router <command> [options]
+  print(`Usage: hedge <command> [options]
 
 Commands:
   init [--output FILE]               Create a starter configuration
-  ingest --input FILE [--format auto|agentgateway|weave|otel|canonical]
+  ingest --input FILE [--format auto|agentgateway|weave|otel|cloudflare|vercel|canonical]
     [--source NAME] [--output FILE] [--dry-run]
                                      Normalize gateway metadata into the exposure ledger
   serve [--config FILE]              Start the optional legacy demo proxy

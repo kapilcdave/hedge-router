@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { normalizeUsage } from './catalog.js';
 
-const FORMATS = new Set(['auto', 'agentgateway', 'weave', 'otel', 'canonical', 'claude-code']);
+const FORMATS = new Set(['auto', 'agentgateway', 'weave', 'otel', 'canonical', 'claude-code', 'cloudflare', 'vercel']);
 
 function digest(value) {
   return createHash('sha256').update(String(value)).digest('hex').slice(0, 24);
@@ -125,8 +125,19 @@ function otelRows(document) {
   });
 }
 
+// Cloudflare wraps logs in {success, result: [...], result_info}; Vercel's generation lookup in
+// {data: {...}}. Unwrap both so a saved API response can be ingested as-is.
+function unwrapEnvelope(row) {
+  if (!row || typeof row !== 'object') return [row];
+  const isLog = (value) => value && typeof value === 'object' && !Array.isArray(value);
+  if (Array.isArray(row.result) && ('success' in row || 'result_info' in row)) return row.result.filter(isLog);
+  if (isLog(row.result) && row.result.tokens_in != null) return [row.result];
+  if (isLog(row.data) && row.data.tokens_prompt != null) return [row.data];
+  return [row];
+}
+
 function expandRows(rows) {
-  return rows.flatMap((row) => {
+  return rows.flatMap(unwrapEnvelope).flatMap((row) => {
     const expanded = otelRows(row);
     return expanded.length ? expanded : [row];
   });
@@ -135,6 +146,8 @@ function expandRows(rows) {
 function detectedFormat(row) {
   const flat = flatten(row);
   if (row.type === 'assistant' && row.message?.usage && row.message?.role === 'assistant') return 'claude-code';
+  if (Object.keys(flat).some((key) => key.startsWith('vercel.ai_gateway.')) || (flat.tokens_prompt != null && flat.provider_name != null)) return 'vercel';
+  if (flat.tokens_in != null && flat.tokens_out != null && flat.created_at != null) return 'cloudflare';
   if (flat.decision_model != null || flat.actual_input_cost_usd != null) return 'weave';
   if (Object.keys(flat).some((key) => key.startsWith('gen_ai.') || key.startsWith('agw.ai.'))) return 'agentgateway';
   if (row.event_type === 'request' || row.schema_version != null) return 'canonical';
@@ -215,6 +228,146 @@ function normalizeClaudeCode(row, source) {
   };
 }
 
+function costUsd(value, currency) {
+  if (currency && String(currency).toUpperCase() !== 'USD') return 0;
+  return number(value);
+}
+
+// Cloudflare AI Gateway log entries (GET .../ai-gateway/gateways/{id}/logs). The API reference
+// types `duration` and `cost` without units; they are read as milliseconds and USD, which matches
+// the dashboard. `metadata` (caller-supplied, often a user or tenant ID), the request/response
+// bodies, and the path are never read. A gateway-cache hit never reaches the provider, so its
+// input is recorded as fully cached rather than as upstream compute.
+function normalizeCloudflare(row, source) {
+  const model = row.model;
+  if (!model) return null;
+  const startedAt = timestamp(row.created_at);
+  if (!startedAt) return null;
+  const hit = boolean(row.cached);
+  const reported = row.status_code != null ? number(row.status_code, 200) : 200;
+  const status = row.success === false && reported < 400 ? 500 : reported;
+  const input = number(row.tokens_in);
+  const rawId = row.id || JSON.stringify([startedAt, model, row.tokens_in, row.tokens_out, row.duration]);
+  return {
+    event_type: 'request',
+    timestamp: startedAt,
+    source,
+    gateway: source,
+    session_id: String(rawId),
+    request_id: `ing_${digest(`${source}:${rawId}`)}`,
+    model: String(model),
+    baseline_model: null,
+    provider: row.provider || null,
+    control: false,
+    route_reason: hit ? 'external_cache_hit' : 'external_gateway',
+    task_class: 'other',
+    input_tokens: input,
+    cached_input_tokens: hit ? input : 0,
+    cache_write_input_tokens: 0,
+    output_tokens: number(row.tokens_out),
+    latency_ms: number(row.duration),
+    routing_overhead_ms: 0,
+    provider_status: status,
+    error_category: statusCategory(status),
+    actual_cost_usd: number(row.cost),
+    baseline_cost_usd: 0,
+    savings_usd: 0,
+    attempts: 1
+  };
+}
+
+const VERCEL_CHILD_SPAN_KEYS = [
+  'vercel.ai_gateway.attempt.id',
+  'vercel.ai_gateway.model_attempt.index',
+  'vercel.ai_gateway.routing.provider_only_filter',
+  'vercel.ai_gateway.routing.custom_provider_order'
+];
+
+// Vercel AI Gateway, from two sources. A trace drain (OTLP/HTTP JSON) emits one root span per
+// request plus routing, model-attempt, and per-provider-attempt child spans; only the root is a
+// request, and the provider attempts are counted as its `attempts`. `/v1/generation` lookups carry
+// the same facts for one request. Tags, user IDs, API-key IDs/names, project and deployment IDs,
+// and referring-site fields are never read. A BYOK request is billed by the provider, so
+// `total_cost` is 0 on the gateway; the market price is the exposure.
+function normalizeVercel(row, source, attemptsByTrace) {
+  const flat = flatten(row);
+  if (flat.tokens_prompt != null) {
+    const startedAt = timestamp(flat.created_at);
+    if (!startedAt) return null;
+    const rawId = flat.id || JSON.stringify([startedAt, flat.model, flat.tokens_prompt, flat.tokens_completion]);
+    return {
+      event_type: 'request',
+      timestamp: startedAt,
+      source,
+      gateway: source,
+      session_id: String(rawId),
+      request_id: `ing_${digest(`${source}:${rawId}`)}`,
+      model: String(flat.model || 'unknown'),
+      baseline_model: null,
+      provider: flat.provider_name || null,
+      control: false,
+      route_reason: 'external_gateway',
+      task_class: 'other',
+      input_tokens: number(flat.tokens_prompt),
+      cached_input_tokens: number(flat.native_tokens_cached),
+      cache_write_input_tokens: number(flat.native_tokens_cache_creation),
+      output_tokens: number(flat.tokens_completion),
+      latency_ms: number(flat.generation_time),
+      routing_overhead_ms: 0,
+      provider_status: 200,
+      error_category: null,
+      actual_cost_usd: boolean(flat.is_byok) ? number(flat.market_cost ?? flat.upstream_inference_cost) : number(flat.total_cost),
+      baseline_cost_usd: 0,
+      savings_usd: 0,
+      attempts: 1
+    };
+  }
+
+  if (VERCEL_CHILD_SPAN_KEYS.some((key) => flat[key] != null) || String(flat.name || '').startsWith('vercel.ai_gateway.')) return null;
+  if (flat['vercel.ai_gateway.request.id'] == null && flat['vercel.ai_gateway.generation.id'] == null) return null;
+  const model = lookup(flat, 'gen_ai.response.model', 'gen_ai.request.model');
+  if (!model) return null;
+  const startedAt = timestamp(lookup(flat, 'start_time')) || new Date().toISOString();
+  const started = lookup(flat, 'start_time');
+  const ended = lookup(flat, 'end_time');
+  const latency = started && ended && /^\d+$/.test(String(started)) && /^\d+$/.test(String(ended))
+    ? Number((BigInt(String(ended)) - BigInt(String(started))) / 1_000_000n)
+    : 0;
+  const rawId = flat['vercel.ai_gateway.generation.id'] || flat['vercel.ai_gateway.request.id'];
+  const status = number(lookup(flat, 'http.response.status_code'), number(flat.status_code) === 2 ? 500 : 200);
+  const failed = status >= 400;
+  const byok = flat['vercel.ai_gateway.credential.type'] === 'byok';
+  const attempts = attemptsByTrace.get(flat.trace_id) || 1;
+  return {
+    event_type: 'request',
+    timestamp: startedAt,
+    source,
+    gateway: source,
+    session_id: String(flat.trace_id || rawId),
+    request_id: `ing_${digest(`${source}:${rawId}`)}`,
+    model: String(model),
+    baseline_model: null,
+    provider: lookup(flat, 'vercel.ai_gateway.provider', 'gen_ai.provider.name') || null,
+    control: false,
+    route_reason: attempts > 1 ? 'external_failover' : 'external_gateway',
+    task_class: 'other',
+    input_tokens: number(flat['gen_ai.usage.input_tokens']),
+    cached_input_tokens: number(flat['gen_ai.usage.cache_read.input_tokens']),
+    cache_write_input_tokens: number(flat['gen_ai.usage.cache_creation.input_tokens']),
+    output_tokens: number(flat['gen_ai.usage.output_tokens']),
+    latency_ms: latency,
+    routing_overhead_ms: 0,
+    provider_status: status,
+    error_category: failed ? statusCategory(status) : null,
+    actual_cost_usd: byok
+      ? costUsd(flat['vercel.ai_gateway.cost.market'], flat['vercel.ai_gateway.cost.market_currency'])
+      : costUsd(flat['vercel.ai_gateway.cost.total'], flat['vercel.ai_gateway.cost.currency']),
+    baseline_cost_usd: 0,
+    savings_usd: 0,
+    attempts
+  };
+}
+
 function normalizeMetadata(row, source) {
   const flat = flatten(row);
   const protocol = lookup(flat, 'protocol');
@@ -281,6 +434,12 @@ export function normalizeGatewayExport(text, options = {}) {
   const events = [];
   let skipped = 0;
   const formats = new Set();
+  const attemptsByTrace = new Map();
+  for (const row of rows) {
+    if (row?.['vercel.ai_gateway.attempt.id'] != null && row.trace_id) {
+      attemptsByTrace.set(row.trace_id, (attemptsByTrace.get(row.trace_id) || 0) + 1);
+    }
+  }
   rows.forEach((row) => {
     const format = requested === 'auto' ? detectedFormat(row) : requested;
     if (!format) {
@@ -293,7 +452,11 @@ export function normalizeGatewayExport(text, options = {}) {
       ? normalizeCanonical(row, source)
       : format === 'claude-code'
         ? normalizeClaudeCode(row, source)
-        : normalizeMetadata(row, source);
+        : format === 'cloudflare'
+          ? normalizeCloudflare(row, source)
+          : format === 'vercel'
+            ? normalizeVercel(row, source, attemptsByTrace)
+            : normalizeMetadata(row, source);
     if (event) events.push(event);
     else skipped += 1;
   });

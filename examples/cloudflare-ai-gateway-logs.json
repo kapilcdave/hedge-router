@@ -1,0 +1,49 @@
+{
+  "success": true,
+  "result": [
+    {
+      "id": "cf-log-example-1",
+      "created_at": "2026-08-30T12:02:00Z",
+      "provider": "openai",
+      "model": "gpt-5-mini",
+      "path": "/v1/chat/completions",
+      "success": true,
+      "status_code": 200,
+      "cached": false,
+      "tokens_in": 900,
+      "tokens_out": 120,
+      "duration": 640,
+      "cost": 0.00047,
+      "metadata": "{\"tenant\":\"dropped-by-the-allowlist\"}"
+    },
+    {
+      "id": "cf-log-example-2",
+      "created_at": "2026-08-30T12:03:00Z",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5",
+      "path": "/v1/messages",
+      "success": false,
+      "status_code": 429,
+      "cached": false,
+      "tokens_in": 0,
+      "tokens_out": 0,
+      "duration": 90,
+      "cost": 0
+    },
+    {
+      "id": "cf-log-example-3",
+      "created_at": "2026-08-30T12:04:00Z",
+      "provider": "openai",
+      "model": "gpt-5-mini",
+      "path": "/v1/chat/completions",
+      "success": true,
+      "status_code": 200,
+      "cached": true,
+      "tokens_in": 900,
+      "tokens_out": 120,
+      "duration": 12,
+      "cost": 0
+    }
+  ],
+  "result_info": { "count": 3, "page": 1, "per_page": 50, "total_count": 3 }
+}
