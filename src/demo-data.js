@@ -1,10 +1,10 @@
 // Recorded, not simulated. Every row below came out of the real pipeline; the demo replays it
 // so a recording can never look better than what the research actually produced.
 //
-// Gateway rows: `hedge-router ingest --format claude-code` over local Claude Code transcripts,
+// Gateway rows: `hedge ingest --format claude-code` over local Claude Code transcripts,
 // sampled across 2026-09-03. The source reports no per-call price or latency, so those stay zero.
 //
-// Market rows: `hedge-router backtest --series KXH100WS --chip H100 --lead-days 1`
+// Market rows: `hedge backtest --series KXH100WS --chip H100 --lead-days 1`
 // against the public Kalshi settled series and the Ornn H100 SXM index, entering at the
 // historical ask with a 7% fee rate and 1c of slippage. These are the trades the trained
 // demand signal actually took: one winner, two losers.

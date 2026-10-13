@@ -242,7 +242,7 @@ export function renderDashboard(state, options = {}) {
 
   rule(demo ? 'RECORDED GATEWAY DATA' : 'LIVE GATEWAY DATA', `${report.requests} requests`);
   if (!state.recent.length) {
-    add('Waiting for metadata. Run hedge-router ingest against a gateway export.', 'dim');
+    add('Waiting for metadata. Run hedge ingest against a gateway export.', 'dim');
   } else {
     add(gatewayRow(gatewayHeader).map(([text]) => [text, 'dim']));
     for (const request of state.recent.slice(0, 5)) {

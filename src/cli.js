@@ -666,6 +666,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  process.stderr.write(`hedge-router: ${error.message}\n`);
+  process.stderr.write(`hedge: ${error.message}\n`);
   process.exitCode = 1;
 });

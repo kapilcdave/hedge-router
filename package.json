@@ -4,9 +4,7 @@
   "description": "A gateway-neutral compute exposure and paper-hedging engine",
   "type": "module",
   "bin": {
-    "hedge": "./src/cli.js",
-    "hedge-router": "./src/cli.js",
-    "comp": "./src/cli.js"
+    "hedge": "./src/cli.js"
   },
   "scripts": {
     "start": "node src/cli.js dashboard",

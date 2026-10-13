@@ -3,7 +3,7 @@ import { createSignal, onCleanup, onMount } from 'solid-js';
 
 async function readStatus(directory: string) {
   try {
-    const child = Bun.spawn(['hedge-router', 'status'], {
+    const child = Bun.spawn(['hedge', 'status'], {
       cwd: directory,
       stdout: 'pipe',
       stderr: 'ignore'

@@ -492,7 +492,7 @@ conclusion of the research, and it stays shut until the research changes it.
 ## Optional legacy proxy
 
 The original OpenAI-compatible router remains available as a demo and migration
-aid under `hedge-router serve`, but it is no longer the product boundary or the
+aid under `hedge serve`, but it is no longer the product boundary or the
 default configuration. A complete configuration is available at
 [`examples/legacy-proxy.config.json`](examples/legacy-proxy.config.json). Provider
 credentials are required only for this optional command.

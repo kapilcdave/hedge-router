@@ -191,7 +191,7 @@ async function fileExists(file) {
 }
 
 // The gate is read from the evaluation artifact rather than recomputed, so that what authorises a
-// live order is the same number the operator can print with `hedge-router gate`. A missing or
+// live order is the same number the operator can print with `hedge gate`. A missing or
 // unparseable artifact is a closed gate, not an open one.
 export async function readGate(paths = executionPaths(), readJsonImpl = null) {
   const load = readJsonImpl || (async (file) => JSON.parse(await readFile(file, 'utf8')));
